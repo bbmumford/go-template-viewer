@@ -1,0 +1,232 @@
+{
+  "name": "go-template-viewer",
+  "displayName": "Go Template Viewer",
+  "description": "Live preview and development tool for Go templates with multi-file support, variable tracking, and dependency management",
+  "version": "0.0.1",
+  "publisher": "bbmumford",
+  "author": {
+    "name": "Brandon Miller-Mumford"
+  },
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Other"
+  ],
+  "keywords": [
+    "go",
+    "golang",
+    "template",
+    "html",
+    "preview",
+    "live reload"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bbmumford/go-template-viewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bbmumford/go-template-viewer/issues"
+  },
+  "homepage": "https://github.com/bbmumford/go-template-viewer#readme",
+  "activationEvents": [
+    "onLanguage:html"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "go-template-viewer.openPreview",
+        "title": "Open Go Template Preview",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "go-template-viewer.refreshPreview",
+        "title": "Refresh Preview",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "go-template-viewer.linkDataFile",
+        "title": "Link Data File to Template"
+      },
+      {
+        "command": "goTemplateViewer.removeDataFile",
+        "title": "Remove Data File",
+        "icon": "$(close)"
+      },
+      {
+        "command": "goTemplateViewer.openDataFile",
+        "title": "Edit JSON Data File",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "goTemplateViewer.editDataValue",
+        "title": "Edit Value"
+      },
+      {
+        "command": "goTemplateViewer.duplicateArrayItem",
+        "title": "Duplicate Item",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "goTemplateViewer.addArrayItem",
+        "title": "Add Item",
+        "icon": "$(add)"
+      },
+      {
+        "command": "goTemplateViewer.deleteDataItem",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "goTemplateViewer.addTemplateFile",
+        "title": "Add Template File",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "goTemplateViewer.openDataFile",
+          "when": "view == goTemplateVariables",
+          "group": "navigation",
+          "icon": "$(json)"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "goTemplateViewer.duplicateArrayItem",
+          "when": "view == goTemplateVariables && viewItem == arrayItem",
+          "group": "inline",
+          "icon": "$(copy)"
+        },
+        {
+          "command": "goTemplateViewer.addArrayItem",
+          "when": "view == goTemplateVariables && viewItem == array",
+          "group": "inline",
+          "icon": "$(add)"
+        },
+        {
+          "command": "goTemplateViewer.deleteDataItem",
+          "when": "view == goTemplateVariables && viewItem =~ /arrayItem|value|array|object/",
+          "group": "inline",
+          "icon": "$(trash)"
+        },
+        {
+          "command": "goTemplateViewer.addTemplateFile",
+          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
+          "group": "inline",
+          "icon": "$(add)"
+        },
+        {
+          "command": "goTemplateViewer.addTemplateFile",
+          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
+          "group": "htmx@1"
+        },
+        {
+          "command": "goTemplateViewer.removeDataFile",
+          "when": "view == goTemplateRenderContext && viewItem == dataFileContext",
+          "group": "inline",
+          "icon": "$(close)"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "go-template-viewer.openPreview",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
+          "group": "navigation",
+          "icon": "$(open-preview)"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "go-template-viewer.openPreview",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
+          "group": "navigation",
+          "icon": "$(open-preview)"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "go-template-viewer.linkDataFile",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
+          "group": "goTemplate"
+        }
+      ]
+    },
+    "views": {
+      "goTemplateViewer": [
+        {
+          "id": "goTemplateRenderContext",
+          "name": "Render Context"
+        },
+        {
+          "id": "goTemplateVariables",
+          "name": "Template Variables"
+        },
+        {
+          "id": "goTemplateDependencies",
+          "name": "Template Dependencies"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "goTemplateViewer",
+          "title": "Go Template Viewer",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Go Template Viewer",
+      "properties": {
+        "goTemplateViewer.contentRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Root directory for serving static assets (CSS, JS, images) relative to workspace. Leave empty to use template file directory."
+        }
+      }
+    },
+    "languages": [
+      {
+        "id": "go-template",
+        "aliases": ["Go Template", "go-template"],
+        "extensions": [".tmpl", ".tpl", ".gohtml"],
+        "configuration": "./language-configuration.json"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.105.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@typescript-eslint/eslint-plugin": "^8.45.0",
+    "@typescript-eslint/parser": "^8.45.0",
+    "eslint": "^9.36.0",
+    "esbuild": "^0.25.10",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.9.3",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}

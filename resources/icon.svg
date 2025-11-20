@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <mask id="textMask">
+      <rect width="128" height="128" fill="white"/>
+      <text x="5.533" y="83.806" font-family="Monaco, Consolas, monospace" font-size="72" font-weight="bold" fill="black" style="white-space: pre; font-size: 72px;" transform="matrix(1.162387, 0, 0, 1.16244, -10.158852, -7.835912)">{</text>
+      <text x="35.062" y="74.269" font-family="Arial, sans-serif" font-size="36" font-weight="bold" fill="black" style="white-space: pre; font-size: 36px;" transform="matrix(1.162387, 0, 0, 1.16244, -9.3508, -6.050785)">GO</text>
+      <text x="77.298" y="83.805" font-family="Monaco, Consolas, monospace" font-size="72" font-weight="bold" fill="black" style="white-space: pre; font-size: 72px;" transform="matrix(1.162387, 0, 0, 1.16244, -8.158852, -7.835912)">}</text>
+    </mask>
+  </defs>
+  <rect width="128" height="128" fill="#00ADD8" rx="16" style="transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0.999997, 0.002395, -0.002395, 0.999997, -0.000031, 0.000007)" mask="url(#textMask)"/>
+</svg>

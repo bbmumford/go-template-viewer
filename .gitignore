@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Node modules
+node_modules/
+
+# Build outputs
+out/
+dist/
+*.vsix
+
+# Go binaries
+bin/
+go-helper/bin/
+
+# IDE
+.vscode-test/
+.vscode/*.log
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+
+# Temporary files
+tmp/
+*.tmp
