@@ -2,7 +2,7 @@
   "name": "go-template-viewer",
   "displayName": "Go Template Viewer",
   "description": "Live preview and development tool for Go templates with multi-file support, variable tracking, and dependency management",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "bbmumford",
   "author": {
     "name": "Brandon Miller-Mumford"

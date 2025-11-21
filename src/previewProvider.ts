@@ -209,14 +209,45 @@ export class GoTemplatePreviewProvider {
 
             console.log('Template data before render:', JSON.stringify(this.templateData, null, 2));
 
-            // Call Go helper to analyze template
-            const analysis = await this.analyzeTemplate(this.currentFile.fsPath);
+            // Call Go helper to analyze template (first pass to discover dependencies)
+            let analysis = await this.analyzeTemplate(this.currentFile.fsPath);
             
             console.log('Analysis result:', JSON.stringify(analysis, null, 2));
             
             // Store templates for selection
             if (analysis.templates) {
                 this.templates = Object.values(analysis.templates);
+            }
+            
+            // Auto-include templates that satisfy dependencies
+            let addedDependencies = false;
+            if (analysis.dependencies && analysis.templates) {
+                for (const dep of analysis.dependencies) {
+                    if (dep.required) {
+                        // Find template that defines this dependency
+                        const providingTemplate = Object.values(analysis.templates).find(t => t.name === dep.name);
+                        if (providingTemplate && providingTemplate.filePath) {
+                            // Add to included files if not already there
+                            if (!this.includedFiles.has(providingTemplate.filePath)) {
+                                console.log(`Auto-including template ${providingTemplate.filePath} to satisfy dependency ${dep.name}`);
+                                this.includedFiles.add(providingTemplate.filePath);
+                                addedDependencies = true;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // If we added dependencies, re-analyze to get complete variable list
+            if (addedDependencies) {
+                console.log('Re-analyzing with auto-included dependencies');
+                analysis = await this.analyzeTemplate(this.currentFile.fsPath);
+                console.log('Re-analysis result:', JSON.stringify(analysis, null, 2));
+                
+                // Update templates again
+                if (analysis.templates) {
+                    this.templates = Object.values(analysis.templates);
+                }
             }
             
             // Get all variables for analysis
@@ -287,11 +318,15 @@ export class GoTemplatePreviewProvider {
     }
 
     private async analyzeTemplate(templatePath: string): Promise<TemplateAnalysisResult> {
-        const helperPath = path.join(this.context.extensionPath, 'bin', 'template-helper');
+        const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+        const helperPath = path.join(this.context.extensionPath, 'bin', helperBinaryName);
         
         // Check if helper exists
         if (!fs.existsSync(helperPath)) {
-            throw new Error('Go template helper not found. Please build it first: cd go-helper && go build -o ../bin/template-helper');
+            const buildCmd = process.platform === 'win32' 
+                ? 'cd go-helper && go build -o ..\\bin\\template-helper.exe'
+                : 'cd go-helper && go build -o ../bin/template-helper';
+            throw new Error(`Go template helper not found. Please build it first: ${buildCmd}`);
         }
 
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.currentFile!);
@@ -332,7 +367,8 @@ export class GoTemplatePreviewProvider {
     }
 
     private async renderTemplate(templatePath: string, data: TemplateData, templateName?: string): Promise<string> {
-        const helperPath = path.join(this.context.extensionPath, 'bin', 'template-helper');
+        const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+        const helperPath = path.join(this.context.extensionPath, 'bin', helperBinaryName);
         
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.currentFile!);
         const cwd = workspaceFolder?.uri.fsPath || path.dirname(templatePath);

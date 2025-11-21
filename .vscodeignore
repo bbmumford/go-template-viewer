@@ -1,0 +1,20 @@
+.vscode/**
+.vscode-test/**
+src/**
+.gitignore
+.yarnrc
+vsc-extension-quickstart.md
+**/tsconfig.json
+**/.eslintrc.json
+**/*.map
+**/*.ts
+node_modules/**
+out/test/**
+*.vsix
+
+# Keep the binaries for all platforms
+!bin/template-helper
+!bin/template-helper.exe
+
+# Keep Go helper source
+!go-helper/**

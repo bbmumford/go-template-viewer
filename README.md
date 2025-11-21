@@ -56,7 +56,7 @@ A Visual Studio Code extension for developing and previewing Go templates with l
 4. Click Install
 
 ### Prerequisites
-The extension includes a pre-built Go helper binary. No additional installation required!
+The extension includes pre-built Go helper binaries for all major platforms (Windows, macOS, Linux). No additional installation required!
 
 ## Usage
 
@@ -186,7 +186,6 @@ This ensures CSS, JavaScript, and images load correctly in the preview.
 
 ## Known Issues
 
-- Binary is macOS only (x64/arm64) - Windows/Linux support coming soon
 - Complex custom template functions require data fixtures
 - Some edge cases in template parsing may not be fully supported
 
@@ -204,7 +203,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/go-template-viewer.git
+git clone https://github.com/bbmumford/go-template-viewer.git
 cd go-template-viewer
 
 # Install dependencies
@@ -212,7 +211,13 @@ npm install
 
 # Build the Go helper
 cd go-helper
+
+# On macOS/Linux:
 go build -o ../bin/template-helper
+
+# On Windows:
+go build -o ../bin/template-helper.exe
+
 cd ..
 
 # Compile and watch
@@ -221,15 +226,24 @@ npm run watch
 # Press F5 to launch Extension Development Host
 ```
 
+## Platform Support
+
+This extension works on:
+- ✅ macOS (Intel & Apple Silicon)
+- ✅ Windows (x64, x86, ARM64)
+- ✅ Linux (x64, ARM64)
+
+The extension automatically detects your platform and uses the correct binary.
+
 ## License
 
 MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- 🐛 [Report Issues](https://github.com/yourusername/go-template-viewer/issues)
-- 💡 [Request Features](https://github.com/yourusername/go-template-viewer/issues/new)
-- 📖 [Documentation](https://github.com/yourusername/go-template-viewer)
+- 🐛 [Report Issues](https://github.com/bbmumford/go-template-viewer/issues)
+- 💡 [Request Features](https://github.com/bbmumford/go-template-viewer/issues/new)
+- 📖 [Documentation](https://github.com/bbmumford/go-template-viewer)
 
 ## Acknowledgments
 

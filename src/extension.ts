@@ -16,7 +16,8 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log(`VS Code version: ${vscode.version}`);
 	
 	// Check if Go helper binary exists
-	const helperPath = path.join(context.extensionPath, 'bin', 'template-helper');
+	const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+	const helperPath = path.join(context.extensionPath, 'bin', helperBinaryName);
 	const helperExists = fs.existsSync(helperPath);
 	
 	console.log(`Go helper binary: ${helperExists ? 'FOUND' : 'MISSING'}`);
@@ -24,15 +25,23 @@ export function activate(context: vscode.ExtensionContext) {
 	
 	if (!helperExists) {
 		const goHelperSrc = path.join(context.extensionPath, 'go-helper');
+		const isWindows = process.platform === 'win32';
+		const buildCmd = isWindows 
+			? 'go build -o ..\\bin\\template-helper.exe'
+			: 'go build -o ../bin/template-helper';
+		const buildCmdFromRoot = isWindows
+			? 'cd go-helper && go build -o ..\\bin\\template-helper.exe'
+			: 'cd go-helper && go build -o ../bin/template-helper';
+		
 		const buildInstructions = `
 The Go template helper binary is not found. This is required for template analysis and rendering.
 
 To build it:
 1. Open terminal in: ${goHelperSrc}
-2. Run: go build -o ../bin/template-helper
+2. Run: ${buildCmd}
 
 Or run from workspace root:
-cd go-helper && go build -o ../bin/template-helper
+${buildCmdFromRoot}
 		`.trim();
 		
 		console.warn('Go helper binary not found!');
@@ -220,7 +229,10 @@ cd go-helper && go build -o ../bin/template-helper
 		
 		const files = await vscode.window.showOpenDialog({
 			canSelectMany: false,
-			filters: { 'Templates': ['html', 'tmpl', 'tpl', 'gohtml'] },
+			filters: {
+				'Template Files': ['html', 'tmpl', 'tpl', 'gohtml'],
+				'All Files': ['*']
+			},
 			defaultUri: workspaceFolder.uri,
 			openLabel: 'Select Entry Template File'
 		});
@@ -294,7 +306,10 @@ cd go-helper && go build -o ../bin/template-helper
 		
 		const files = await vscode.window.showOpenDialog({
 			canSelectMany: false,
-			filters: { 'Templates': ['html', 'tmpl', 'tpl', 'gohtml'] },
+			filters: {
+				'Template Files': ['html', 'tmpl', 'tpl', 'gohtml'],
+				'All Files': ['*']
+			},
 			defaultUri: workspaceFolder.uri,
 			openLabel: dependencyName ? `Select file that defines "${dependencyName}"` : 'Select Template File'
 		});
