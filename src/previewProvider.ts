@@ -7,6 +7,19 @@ import { TemplateData, TemplateAnalysisResult, TemplateVariable, TemplateDepende
 
 const execFileAsync = promisify(execFile);
 
+// Auto-dismissing notification helper (5 second timeout)
+function showTimedNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+    const timeout = 5000;
+    vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, cancellable: false },
+        async (progress) => {
+            const icon = type === 'error' ? '$(error)' : type === 'warning' ? '$(warning)' : '$(info)';
+            progress.report({ message: `${icon} ${message}` });
+            await new Promise(resolve => setTimeout(resolve, timeout));
+        }
+    );
+}
+
 export class GoTemplatePreviewProvider {
     private static readonly viewType = 'goTemplatePreview';
     private panel: vscode.WebviewPanel | undefined;
@@ -19,8 +32,21 @@ export class GoTemplatePreviewProvider {
     private templates: TemplateDefinition[] = [];
     private selectedTemplate?: string;
     private includedFiles: Set<string> = new Set(); // Files included in render context
+    private lastRenderedHtml?: string; // Store last rendered HTML for export
+    private diagnosticCollection: vscode.DiagnosticCollection;
+    
+    // Debounce timer for analyzeAndRender
+    private analyzeDebounceTimer: NodeJS.Timeout | undefined;
+    private isAnalyzing: boolean = false;
+    private pendingAnalysis: boolean = false;
+    
+    // Flag to track if initial context has been restored
+    private contextRestored: boolean = false;
 
-    constructor(private context: vscode.ExtensionContext) {}
+    constructor(private context: vscode.ExtensionContext) {
+        this.diagnosticCollection = vscode.languages.createDiagnosticCollection('go-template');
+        context.subscriptions.push(this.diagnosticCollection);
+    }
 
     onDataChange(callback: (variables: TemplateVariable[], dataFilePath?: string, dependencies?: TemplateDependency[], htmxInfo?: HtmxInfo) => void) {
         this.onDataChangeCallback = callback;
@@ -45,28 +71,27 @@ export class GoTemplatePreviewProvider {
     public setTemplateData(data: any) {
         this.templateData = data;
         this.saveTemplateData(data);
-        this.analyzeAndRender();
+        this.scheduleAnalyzeAndRender();
     }
     
     public async addTemplateFile(filePath: string) {
         console.log('Adding template file:', filePath);
         this.includedFiles.add(filePath);
         console.log('Included files now:', Array.from(this.includedFiles));
-        console.log('Panel exists:', !!this.panel, 'Current file:', this.currentFile?.fsPath);
-        // Re-analyze and render with new file included
-        await this.analyzeAndRender();
+        // Schedule debounced re-analyze - allows rapid additions without multiple renders
+        this.scheduleAnalyzeAndRender();
     }
     
     public async removeTemplateFile(filePath: string) {
         this.includedFiles.delete(filePath);
-        // Re-analyze and render without this file
-        await this.analyzeAndRender();
+        // Schedule debounced re-analyze
+        this.scheduleAnalyzeAndRender();
     }
     
     public setSelectedTemplate(templateName?: string) {
         this.selectedTemplate = templateName;
         // Re-render with the selected template
-        this.analyzeAndRender();
+        this.scheduleAnalyzeAndRender();
     }
 
     public async openPreview(fileUri: vscode.Uri, resetContext: boolean = true) {
@@ -85,6 +110,7 @@ export class GoTemplatePreviewProvider {
             this.currentFile = fileUri;
             this.includedFiles.clear();
             this.includedFiles.add(fileUri.fsPath);
+            this.contextRestored = false; // Allow context to be restored from data file
             console.log('Reset context - includedFiles now:', Array.from(this.includedFiles));
         }
         
@@ -96,6 +122,7 @@ export class GoTemplatePreviewProvider {
                 this.currentFile = fileUri;
                 this.includedFiles.clear();
                 this.includedFiles.add(fileUri.fsPath);
+                this.contextRestored = false; // Allow context to be restored from data file
                 await this.analyzeAndRender();
             }
         } else {
@@ -135,9 +162,6 @@ export class GoTemplatePreviewProvider {
             }, null, this.disposables);
         }
 
-        // Set context for views
-        vscode.commands.executeCommand('setContext', 'goTemplatePreviewActive', true);
-
         // Setup file watcher for live reload
         this.setupFileWatcher();
 
@@ -174,15 +198,15 @@ export class GoTemplatePreviewProvider {
         );
 
         this.fileWatcher.onDidChange(() => {
-            this.analyzeAndRender();
+            this.scheduleAnalyzeAndRender();
         });
 
         this.fileWatcher.onDidCreate(() => {
-            this.analyzeAndRender();
+            this.scheduleAnalyzeAndRender();
         });
 
         this.fileWatcher.onDidDelete(() => {
-            this.analyzeAndRender();
+            this.scheduleAnalyzeAndRender();
         });
     }
 
@@ -193,26 +217,72 @@ export class GoTemplatePreviewProvider {
         }
     }
 
-    private async analyzeAndRender() {
-        console.log('analyzeAndRender called - Panel:', !!this.panel, 'CurrentFile:', this.currentFile?.fsPath);
+    /**
+     * Schedule an analyze and render with debouncing.
+     * Multiple rapid calls will be collapsed into a single execution.
+     */
+    private scheduleAnalyzeAndRender(delay: number = 150) {
+        // Clear any pending timer
+        if (this.analyzeDebounceTimer) {
+            clearTimeout(this.analyzeDebounceTimer);
+        }
         
+        // If already analyzing, mark that we need another run
+        if (this.isAnalyzing) {
+            this.pendingAnalysis = true;
+            return;
+        }
+        
+        this.analyzeDebounceTimer = setTimeout(() => {
+            this.analyzeDebounceTimer = undefined;
+            this.doAnalyzeAndRender();
+        }, delay);
+    }
+
+    private async doAnalyzeAndRender() {
+        if (this.isAnalyzing) {
+            this.pendingAnalysis = true;
+            return;
+        }
+        
+        this.isAnalyzing = true;
+        try {
+            await this.analyzeAndRenderImpl();
+        } finally {
+            this.isAnalyzing = false;
+            
+            // If another analysis was requested while we were running, do it now
+            if (this.pendingAnalysis) {
+                this.pendingAnalysis = false;
+                this.scheduleAnalyzeAndRender(50); // Shorter delay for pending
+            }
+        }
+    }
+
+    /**
+     * Public method for direct analyze/render (used by openPreview).
+     * For most cases, prefer scheduleAnalyzeAndRender for debouncing.
+     */
+    private async analyzeAndRender() {
+        return this.doAnalyzeAndRender();
+    }
+
+    private async analyzeAndRenderImpl() {
         if (!this.panel || !this.currentFile) {
-            console.log('analyzeAndRender: Skipping - no panel or current file');
             return;
         }
 
-        console.log('analyzeAndRender called for:', this.currentFile.fsPath);
+        const startTime = Date.now();
 
         try {
             // Load saved template data if exists
-            await this.loadTemplateData();
-
-            console.log('Template data before render:', JSON.stringify(this.templateData, null, 2));
+            // Restore context (includedFiles) only on initial load, not subsequent re-renders
+            const shouldRestoreContext = !this.contextRestored;
+            await this.loadTemplateData(shouldRestoreContext);
+            this.contextRestored = true;
 
             // Call Go helper to analyze template (first pass to discover dependencies)
             let analysis = await this.analyzeTemplate(this.currentFile.fsPath);
-            
-            console.log('Analysis result:', JSON.stringify(analysis, null, 2));
             
             // Store templates for selection
             if (analysis.templates) {
@@ -229,7 +299,6 @@ export class GoTemplatePreviewProvider {
                         if (providingTemplate && providingTemplate.filePath) {
                             // Add to included files if not already there
                             if (!this.includedFiles.has(providingTemplate.filePath)) {
-                                console.log(`Auto-including template ${providingTemplate.filePath} to satisfy dependency ${dep.name}`);
                                 this.includedFiles.add(providingTemplate.filePath);
                                 addedDependencies = true;
                             }
@@ -240,9 +309,7 @@ export class GoTemplatePreviewProvider {
             
             // If we added dependencies, re-analyze to get complete variable list
             if (addedDependencies) {
-                console.log('Re-analyzing with auto-included dependencies');
                 analysis = await this.analyzeTemplate(this.currentFile.fsPath);
-                console.log('Re-analysis result:', JSON.stringify(analysis, null, 2));
                 
                 // Update templates again
                 if (analysis.templates) {
@@ -252,12 +319,10 @@ export class GoTemplatePreviewProvider {
             
             // Get all variables for analysis
             const allVars = analysis.variables || [];
-            console.log(`Total variables found: ${allVars.length}`);
             
             // If template data is empty AND we have no linked data file, initialize with suggested values
             // This only happens on first load or when explicitly reset
             if (Object.keys(this.templateData).length === 0 && !this.currentDataFilePath) {
-                console.log('Initializing empty template data with suggested values');
                 for (const variable of allVars) {
                     const path = variable.path.replace(/^\./, ''); // Remove leading dot
                     if (variable.suggested !== undefined) {
@@ -266,7 +331,6 @@ export class GoTemplatePreviewProvider {
                 }
             } else if (!this.currentDataFilePath) {
                 // No linked data file - rebuild from scratch to match current templates
-                console.log('No data file linked - rebuilding template data from current templates');
                 this.templateData = {};
                 for (const variable of allVars) {
                     const path = variable.path.replace(/^\./, ''); // Remove leading dot
@@ -276,7 +340,6 @@ export class GoTemplatePreviewProvider {
                 }
             } else {
                 // Template data exists with linked file - merge in any NEW variables from newly added templates
-                console.log('Merging new variables into existing template data');
                 let hasNewVariables = false;
                 
                 for (const variable of allVars) {
@@ -285,7 +348,6 @@ export class GoTemplatePreviewProvider {
                     
                     // Only add if variable doesn't exist yet and we have a suggested value
                     if (currentValue === undefined && variable.suggested !== undefined) {
-                        console.log(`Adding new variable: ${path}`);
                         this.setDeep(this.templateData, path, variable.suggested);
                         hasNewVariables = true;
                     }
@@ -304,16 +366,146 @@ export class GoTemplatePreviewProvider {
 
             // Render the template (with selected template if specified)
             const rendered = await this.renderTemplate(this.currentFile.fsPath, this.templateData, this.selectedTemplate);
-            
-            console.log('Rendered HTML length:', rendered.length);
+
+            // Store rendered HTML for export
+            this.lastRenderedHtml = rendered;
+
+            // Clear any previous diagnostics on success
+            this.diagnosticCollection.clear();
+
+            // Set context to enable export button
+            vscode.commands.executeCommand('setContext', 'goTemplatePreviewActive', true);
 
             // Update webview with rendered HTML
             this.panel.webview.html = this.processHtmlForWebview(rendered);
             
+            console.log(`Render complete in ${Date.now() - startTime}ms (${this.includedFiles.size} files)`);
+            
         } catch (error) {
-            console.error('Error analyzing and rendering:', error);
-            vscode.window.showErrorMessage(`Error: ${error}`);
+            console.error('Template error:', error);
+            
+            // Clear context to disable export button on error
+            vscode.commands.executeCommand('setContext', 'goTemplatePreviewActive', false);
+            
+            // Parse and display template errors as diagnostics
+            this.parseAndShowErrors(String(error));
+            
+            showTimedNotification(`Template Error: ${error}`, 'error');
             this.panel.webview.html = this.getErrorHtml(String(error));
+        }
+    }
+
+    private parseAndShowErrors(errorMessage: string) {
+        // Clear previous diagnostics
+        this.diagnosticCollection.clear();
+        
+        if (!this.currentFile) {
+            return;
+        }
+
+        // Try to parse error message for file and line information
+        // Common Go template error formats:
+        // template: filename.html:23:15: undefined variable ".Missing"
+        // template: filename.html:5: function "unknown" not defined
+        const errorRegex = /template:\s+(.+?):(\d+)(?::(\d+))?\s*:\s*(.+)/gi;
+        const diagnosticsMap = new Map<string, vscode.Diagnostic[]>();
+        
+        let match;
+        while ((match = errorRegex.exec(errorMessage)) !== null) {
+            const [, fileName, lineStr, columnStr, message] = match;
+            const line = parseInt(lineStr) - 1; // VS Code uses 0-based line numbers
+            const column = columnStr ? parseInt(columnStr) - 1 : 0;
+            
+            // Try to find the actual file path
+            let fileUri: vscode.Uri | undefined;
+            
+            // Check if it matches current file
+            if (path.basename(this.currentFile.fsPath) === fileName) {
+                fileUri = this.currentFile;
+            } else {
+                // Check included files
+                for (const includedPath of this.includedFiles) {
+                    if (path.basename(includedPath) === fileName) {
+                        fileUri = vscode.Uri.file(includedPath);
+                        break;
+                    }
+                }
+            }
+            
+            if (fileUri) {
+                const range = new vscode.Range(
+                    new vscode.Position(Math.max(0, line), column),
+                    new vscode.Position(Math.max(0, line), column + 50) // Highlight a reasonable length
+                );
+                
+                const diagnostic = new vscode.Diagnostic(
+                    range,
+                    message.trim(),
+                    vscode.DiagnosticSeverity.Error
+                );
+                diagnostic.source = 'go-template';
+                
+                if (!diagnosticsMap.has(fileUri.toString())) {
+                    diagnosticsMap.set(fileUri.toString(), []);
+                }
+                diagnosticsMap.get(fileUri.toString())!.push(diagnostic);
+            }
+        }
+        
+        // Apply all diagnostics
+        for (const [uriStr, diagnostics] of diagnosticsMap) {
+            this.diagnosticCollection.set(vscode.Uri.parse(uriStr), diagnostics);
+        }
+        
+        // If no specific file errors were parsed, show generic error on current file
+        if (diagnosticsMap.size === 0 && this.currentFile) {
+            const diagnostic = new vscode.Diagnostic(
+                new vscode.Range(0, 0, 0, 50),
+                errorMessage,
+                vscode.DiagnosticSeverity.Error
+            );
+            diagnostic.source = 'go-template';
+            this.diagnosticCollection.set(this.currentFile, [diagnostic]);
+        }
+    }
+
+    public async exportHtml() {
+        if (!this.lastRenderedHtml) {
+            showTimedNotification('No rendered HTML to export. Please open a template preview first.', 'error');
+            return;
+        }
+
+        if (!this.currentFile) {
+            showTimedNotification('No active template file.', 'error');
+            return;
+        }
+
+        // Suggest filename based on current template
+        const currentFileName = path.basename(this.currentFile.fsPath, path.extname(this.currentFile.fsPath));
+        const defaultFileName = `${currentFileName}.html`;
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const defaultUri = workspaceFolder 
+            ? vscode.Uri.file(path.join(workspaceFolder.uri.fsPath, defaultFileName))
+            : vscode.Uri.file(path.join(path.dirname(this.currentFile.fsPath), defaultFileName));
+
+        const saveUri = await vscode.window.showSaveDialog({
+            defaultUri: defaultUri,
+            filters: {
+                'HTML Files': ['html'],
+                'All Files': ['*']
+            },
+            saveLabel: 'Export HTML'
+        });
+
+        if (!saveUri) {
+            return; // User cancelled
+        }
+
+        try {
+            await fs.promises.writeFile(saveUri.fsPath, this.lastRenderedHtml, 'utf8');
+            showTimedNotification(`Exported HTML to ${path.basename(saveUri.fsPath)}`);
+        } catch (error) {
+            showTimedNotification(`Failed to export HTML: ${error}`, 'error');
         }
     }
 
@@ -525,12 +717,10 @@ export class GoTemplatePreviewProvider {
 
     public updateData(data: any) {
         this.templateData = data;
-        this.analyzeAndRender();
+        this.scheduleAnalyzeAndRender();
     }
 
     public updateVariable(name: string, value: any) {
-        console.log('updateVariable called:', name, value);
-        
         // If value is undefined, remove the variable
         if (value === undefined) {
             this.deleteDeep(this.templateData, name);
@@ -539,9 +729,8 @@ export class GoTemplatePreviewProvider {
             this.setDeep(this.templateData, name, value);
         }
         
-        console.log('Template data after update:', JSON.stringify(this.templateData, null, 2));
         this.saveTemplateData(this.templateData);
-        this.analyzeAndRender();
+        this.scheduleAnalyzeAndRender();
     }
 
     private deleteDeep(target: any, path: string) {
@@ -584,9 +773,13 @@ export class GoTemplatePreviewProvider {
         }
     }
 
-    private setDeep(target: any, path: string, value: any) {
+    /**
+     * Set a value deep in an object using path notation.
+     * Returns true if successful, false if there was a type conflict.
+     */
+    private setDeep(target: any, path: string, value: any): boolean {
         if (!path) {
-            return;
+            return false;
         }
         // normalize path: remove leading dot if present
         const normalized = path.replace(/^\./, '');
@@ -601,6 +794,13 @@ export class GoTemplatePreviewProvider {
             if (i === parts.length - 1) {
                 // Last part - set the value
                 if (part.isArray) {
+                    // Check if we can create an array here
+                    const existingValue = cur[part.key];
+                    if (existingValue !== undefined && !Array.isArray(existingValue) && typeof existingValue !== 'object') {
+                        // Type conflict: existing primitive where we need an array
+                        console.warn(`Type conflict at ${path}: cannot create array at ${part.key}, existing value is ${typeof existingValue}`);
+                        return false;
+                    }
                     // Setting an array element
                     if (!Array.isArray(cur[part.key])) {
                         cur[part.key] = [];
@@ -609,20 +809,43 @@ export class GoTemplatePreviewProvider {
                 } else {
                     cur[part.key] = value;
                 }
-                return;
+                return true;
             }
             
             // Not the last part - navigate or create structure
             if (part.isArray) {
+                // Check if we can create an array here
+                const existingArrayValue = cur[part.key];
+                if (existingArrayValue !== undefined && !Array.isArray(existingArrayValue)) {
+                    if (typeof existingArrayValue !== 'object') {
+                        // Type conflict: existing primitive where we need an array
+                        console.warn(`Type conflict at ${path}: cannot create array at ${part.key}, existing value is ${typeof existingArrayValue}`);
+                        return false;
+                    }
+                }
                 // Handle array navigation
                 if (!Array.isArray(cur[part.key])) {
                     cur[part.key] = [];
+                }
+                // Check if array element is a primitive when we need an object
+                const existingElement = cur[part.key][part.index!];
+                if (existingElement !== undefined && existingElement !== null && typeof existingElement !== 'object') {
+                    // Type conflict: array element is a primitive but we need to navigate deeper
+                    console.warn(`Type conflict at ${path}: ${part.key}[${part.index}] is ${typeof existingElement}, cannot add nested properties`);
+                    return false;
                 }
                 if (!cur[part.key][part.index!]) {
                     cur[part.key][part.index!] = {};
                 }
                 cur = cur[part.key][part.index!];
             } else {
+                // Check if existing value is a primitive when we need an object
+                const existingObjValue = cur[part.key];
+                if (existingObjValue !== undefined && existingObjValue !== null && typeof existingObjValue !== 'object') {
+                    // Type conflict: existing primitive where we need an object
+                    console.warn(`Type conflict at ${path}: ${part.key} is ${typeof existingObjValue}, cannot add nested properties`);
+                    return false;
+                }
                 // Handle object navigation
                 if (cur[part.key] === undefined || typeof cur[part.key] !== 'object' || Array.isArray(cur[part.key])) {
                     cur[part.key] = {};
@@ -630,6 +853,7 @@ export class GoTemplatePreviewProvider {
                 cur = cur[part.key];
             }
         }
+        return true;
     }
     
     /**
@@ -706,7 +930,6 @@ export class GoTemplatePreviewProvider {
         
         if (this.currentDataFilePath) {
             dataFile = this.currentDataFilePath;
-            console.log('Saving to linked data file:', dataFile);
         } else {
             // No linked file, save to auto-named file
             const dataDir = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data');
@@ -719,19 +942,34 @@ export class GoTemplatePreviewProvider {
             
             // Update currentDataFilePath to track where we saved
             this.currentDataFilePath = dataFile;
-            console.log('Saving to auto-named data file:', dataFile);
         }
 
         try {
-            const content = JSON.stringify(data, null, 2);
+            // Create data object with template context metadata
+            const dataWithContext = {
+                ...data,
+                _templateContext: {
+                    entryFile: path.relative(workspaceFolder.uri.fsPath, this.currentFile.fsPath),
+                    includedFiles: Array.from(this.includedFiles).map(f => 
+                        path.relative(workspaceFolder.uri.fsPath, f)
+                    ),
+                    selectedTemplate: this.selectedTemplate || undefined,
+                    lastSaved: new Date().toISOString()
+                }
+            };
+            
+            const content = JSON.stringify(dataWithContext, null, 2);
             fs.writeFileSync(dataFile, content);
-            console.log('Template data saved successfully');
         } catch (error) {
-            vscode.window.showErrorMessage(`Error saving template data: ${error}`);
+            showTimedNotification(`Error saving template data: ${error}`, 'error');
         }
     }
 
-    private async loadTemplateData() {
+    /**
+     * Load template data and optionally restore render context from saved metadata.
+     * @param restoreContext If true, will restore includedFiles from saved _templateContext
+     */
+    private async loadTemplateData(restoreContext: boolean = false) {
         if (!this.currentFile) {
             return;
         }
@@ -747,9 +985,17 @@ export class GoTemplatePreviewProvider {
         if (configLinkedFile && fs.existsSync(configLinkedFile)) {
             try {
                 const content = fs.readFileSync(configLinkedFile, 'utf8');
-                this.templateData = JSON.parse(content);
+                const parsed = JSON.parse(content);
+                
+                // Extract template context if present and restore if requested
+                if (restoreContext && parsed._templateContext) {
+                    await this.restoreTemplateContext(parsed._templateContext, workspaceFolder.uri.fsPath);
+                }
+                
+                // Remove _templateContext from runtime data
+                const { _templateContext, ...dataOnly } = parsed;
+                this.templateData = dataOnly;
                 this.currentDataFilePath = configLinkedFile;
-                console.log('Loaded config-linked data file:', configLinkedFile);
                 return;
             } catch (error) {
                 console.error('Error loading config-linked data file:', error);
@@ -762,9 +1008,17 @@ export class GoTemplatePreviewProvider {
         if (commentLinkedFile && fs.existsSync(commentLinkedFile)) {
             try {
                 const content = fs.readFileSync(commentLinkedFile, 'utf8');
-                this.templateData = JSON.parse(content);
+                const parsed = JSON.parse(content);
+                
+                // Extract template context if present and restore if requested
+                if (restoreContext && parsed._templateContext) {
+                    await this.restoreTemplateContext(parsed._templateContext, workspaceFolder.uri.fsPath);
+                }
+                
+                // Remove _templateContext from runtime data
+                const { _templateContext, ...dataOnly } = parsed;
+                this.templateData = dataOnly;
                 this.currentDataFilePath = commentLinkedFile;
-                console.log('Loaded comment-linked data file:', commentLinkedFile);
                 return;
             } catch (error) {
                 console.error('Error loading comment-linked data file:', error);
@@ -778,15 +1032,52 @@ export class GoTemplatePreviewProvider {
         if (fs.existsSync(dataFile)) {
             try {
                 const content = fs.readFileSync(dataFile, 'utf8');
-                this.templateData = JSON.parse(content);
+                const parsed = JSON.parse(content);
+                
+                // Extract template context if present and restore if requested
+                if (restoreContext && parsed._templateContext) {
+                    await this.restoreTemplateContext(parsed._templateContext, workspaceFolder.uri.fsPath);
+                }
+                
+                // Remove _templateContext from runtime data
+                const { _templateContext, ...dataOnly } = parsed;
+                this.templateData = dataOnly;
                 this.currentDataFilePath = dataFile;
-                console.log('Loaded auto-named data file:', dataFile);
             } catch (error) {
                 console.error('Error loading template data:', error);
             }
         } else {
             this.currentDataFilePath = undefined;
-            console.log('No data file found, using empty data');
+        }
+    }
+
+    /**
+     * Restore render context (includedFiles, selectedTemplate) from saved metadata
+     */
+    private async restoreTemplateContext(context: any, workspaceRoot: string): Promise<void> {
+        if (!context) {
+            return;
+        }
+
+        // Restore included files
+        if (Array.isArray(context.includedFiles)) {
+            this.includedFiles.clear();
+            
+            for (const relativePath of context.includedFiles) {
+                const absolutePath = path.join(workspaceRoot, relativePath);
+                if (fs.existsSync(absolutePath)) {
+                    this.includedFiles.add(absolutePath);
+                } else {
+                    console.warn(`Saved template file not found: ${relativePath}`);
+                }
+            }
+            
+            console.log(`Restored ${this.includedFiles.size} files from template context`);
+        }
+
+        // Restore selected template if specified
+        if (context.selectedTemplate) {
+            this.selectedTemplate = context.selectedTemplate;
         }
     }
 
@@ -928,10 +1219,15 @@ export class GoTemplatePreviewProvider {
     }
 
     public refresh() {
-        this.analyzeAndRender();
+        this.scheduleAnalyzeAndRender(0); // Immediate for explicit refresh
     }
 
     public dispose() {
+        // Clear any pending debounce timer
+        if (this.analyzeDebounceTimer) {
+            clearTimeout(this.analyzeDebounceTimer);
+        }
+        
         this.disposeWatcher();
         
         if (this.panel) {

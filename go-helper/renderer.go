@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -144,5 +145,56 @@ func (r *TemplateRenderer) getTemplateFuncs() template.FuncMap {
 		"lower": strings.ToLower,
 		"title": strings.Title,
 		"trim":  strings.TrimSpace,
+		// Array/slice helpers - accept (index, slice) to check position
+		"isLast": func(i int, slice interface{}) bool {
+			v := reflect.ValueOf(slice)
+			if v.Kind() == reflect.Slice || v.Kind() == reflect.Array {
+				return i == v.Len()-1
+			}
+			return false
+		},
+		"isFirst": func(i int) bool { return i == 0 },
+		"len": func(v interface{}) int {
+			rv := reflect.ValueOf(v)
+			switch rv.Kind() {
+			case reflect.Slice, reflect.Array, reflect.Map, reflect.String, reflect.Chan:
+				return rv.Len()
+			default:
+				return 0
+			}
+		},
+		"seq": func(start, end int) []int {
+			var result []int
+			for i := start; i <= end; i++ {
+				result = append(result, i)
+			}
+			return result
+		},
+		// String helpers
+		"contains":  strings.Contains,
+		"hasPrefix": strings.HasPrefix,
+		"hasSuffix": strings.HasSuffix,
+		"replace":   strings.ReplaceAll,
+		"split":     strings.Split,
+		"join":      strings.Join,
+		// Safe HTML output
+		"safeHTML": func(s string) template.HTML { return template.HTML(s) },
+		"safeJS":   func(s string) template.JS { return template.JS(s) },
+		"safeCSS":  func(s string) template.CSS { return template.CSS(s) },
+		"safeURL":  func(s string) template.URL { return template.URL(s) },
+		// Default value helper
+		"default": func(defaultVal, val interface{}) interface{} {
+			if val == nil || val == "" || val == 0 || val == false {
+				return defaultVal
+			}
+			return val
+		},
+		// Conditional helpers
+		"ternary": func(cond bool, trueVal, falseVal interface{}) interface{} {
+			if cond {
+				return trueVal
+			}
+			return falseVal
+		},
 	}
 }

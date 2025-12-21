@@ -2,7 +2,7 @@
   "name": "go-template-viewer",
   "displayName": "Go Template Viewer",
   "description": "Live preview and development tool for Go templates with multi-file support, variable tracking, and dependency management",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "bbmumford",
   "author": {
     "name": "Brandon Miller-Mumford"
@@ -86,9 +86,20 @@
         "command": "goTemplateViewer.addTemplateFile",
         "title": "Add Template File",
         "icon": "$(add)"
+      },
+      {
+        "command": "goTemplateViewer.exportHtml",
+        "title": "Export Preview as HTML",
+        "icon": "$(save)"
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "goTemplateViewer.exportHtml",
+          "when": "goTemplatePreviewActive"
+        }
+      ],
       "view/title": [
         {
           "command": "goTemplateViewer.openDataFile",
@@ -118,13 +129,13 @@
         },
         {
           "command": "goTemplateViewer.addTemplateFile",
-          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
+          "when": "view == goTemplateDependencies && viewItem == htmxHtmlRequest",
           "group": "inline",
           "icon": "$(add)"
         },
         {
           "command": "goTemplateViewer.addTemplateFile",
-          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
+          "when": "view == goTemplateDependencies && viewItem == htmxHtmlRequest",
           "group": "htmx@1"
         },
         {
@@ -148,6 +159,12 @@
           "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
           "group": "navigation",
           "icon": "$(open-preview)"
+        },
+        {
+          "command": "goTemplateViewer.exportHtml",
+          "when": "activeWebviewPanelId == 'goTemplatePreview' && goTemplatePreviewActive",
+          "group": "navigation",
+          "icon": "$(save)"
         }
       ],
       "editor/context": [

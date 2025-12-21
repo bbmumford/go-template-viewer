@@ -36,10 +36,7 @@ export interface HtmxDependency {
     trigger?: string; // hx-trigger value
     filePath: string;
     line?: number;
-    satisfied?: boolean; // Whether a matching fragment/endpoint exists
     context?: string; // Surrounding HTML context for display
-    isHtmlFragment?: boolean; // Whether this likely returns HTML
-    suggestedFragments?: string[]; // Suggested fragment files
 }
 
 export interface HtmxInfo {

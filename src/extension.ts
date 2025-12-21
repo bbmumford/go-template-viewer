@@ -6,6 +6,19 @@ import * as fs from 'fs';
 import { GoTemplatePreviewProvider } from './previewProvider';
 import { RenderContextProvider, TemplateVariablesProvider, TemplateDependenciesProvider, VariableItem } from './templateViewProviders';
 
+// Auto-dismissing notification helper (5 second timeout)
+function showTimedNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+    const timeout = 5000;
+    vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, cancellable: false },
+        async (progress) => {
+            const icon = type === 'error' ? '$(error)' : type === 'warning' ? '$(warning)' : '$(info)';
+            progress.report({ message: `${icon} ${message}` });
+            await new Promise(resolve => setTimeout(resolve, timeout));
+        }
+    );
+}
+
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
@@ -158,7 +171,7 @@ ${buildCmdFromRoot}
 			if (activeEditor) {
 				fileUri = activeEditor.document.uri;
 			} else {
-				vscode.window.showErrorMessage('No file selected or open');
+				showTimedNotification('No file selected or open', 'error');
 				return;
 			}
 		}
@@ -168,19 +181,23 @@ ${buildCmdFromRoot}
 		const isTemplateFile = /\.(html|tmpl|tpl|gohtml)$/.test(fileName);
 		
 		if (!isTemplateFile) {
-			vscode.window.showWarningMessage('Selected file does not appear to be a template file');
+			showTimedNotification('Selected file does not appear to be a template file', 'warning');
 		}
 
 		try {
 			// Don't reset context if preview already exists - just show it
 			await previewProvider.openPreview(fileUri, false);
 		} catch (error) {
-			vscode.window.showErrorMessage(`Error opening preview: ${error}`);
+			showTimedNotification(`Error opening preview: ${error}`, 'error');
 		}
 	});
 
 	const refreshPreviewCommand = vscode.commands.registerCommand('go-template-viewer.refreshPreview', () => {
 		previewProvider.refresh();
+	});
+
+	const exportHtmlCommand = vscode.commands.registerCommand('goTemplateViewer.exportHtml', async () => {
+		await previewProvider.exportHtml();
 	});
 
 	const editDataValueCommand = vscode.commands.registerCommand('goTemplateViewer.editDataValue', async (item: VariableItem) => {
@@ -212,7 +229,7 @@ ${buildCmdFromRoot}
 			const doc = await vscode.workspace.openTextDocument(dataFilePath);
 			await vscode.window.showTextDocument(doc);
 		} else {
-			vscode.window.showInformationMessage('No data file is currently linked');
+			showTimedNotification('No data file is currently linked');
 		}
 	});
 
@@ -223,7 +240,7 @@ ${buildCmdFromRoot}
 	const changeEntryFileCommand = vscode.commands.registerCommand('goTemplateViewer.changeEntryFile', async () => {
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
-			vscode.window.showErrorMessage('No workspace folder open');
+			showTimedNotification('No workspace folder open', 'error');
 			return;
 		}
 		
@@ -234,7 +251,7 @@ ${buildCmdFromRoot}
 				'All Files': ['*']
 			},
 			defaultUri: workspaceFolder.uri,
-			openLabel: 'Select Entry Template File'
+			openLabel: 'Select File'
 		});
 		
 		if (!files || files.length === 0) {
@@ -266,13 +283,13 @@ ${buildCmdFromRoot}
 			// Save current data to a new file
 			const currentData = previewProvider.getTemplateData();
 			if (!currentData || Object.keys(currentData).length === 0) {
-				vscode.window.showWarningMessage('No template data to save');
+				showTimedNotification('No template data to save', 'warning');
 				return;
 			}
 			
 			const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 			if (!workspaceFolder) {
-				vscode.window.showErrorMessage('No workspace folder open');
+				showTimedNotification('No workspace folder open', 'error');
 				return;
 			}
 			
@@ -288,9 +305,9 @@ ${buildCmdFromRoot}
 				try {
 					const content = JSON.stringify(currentData, null, 2);
 					await vscode.workspace.fs.writeFile(saveUri, Buffer.from(content, 'utf8'));
-					vscode.window.showInformationMessage(`Saved template data to ${path.basename(saveUri.fsPath)}`);
+					showTimedNotification(`Saved template data to ${path.basename(saveUri.fsPath)}`);
 				} catch (error) {
-					vscode.window.showErrorMessage(`Error saving data file: ${error}`);
+					showTimedNotification(`Error saving data file: ${error}`, 'error');
 				}
 			}
 		}
@@ -300,7 +317,7 @@ ${buildCmdFromRoot}
 		// Show file picker for template files
 		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
 		if (!workspaceFolder) {
-			vscode.window.showErrorMessage('No workspace folder open');
+			showTimedNotification('No workspace folder open', 'error');
 			return;
 		}
 		
@@ -311,7 +328,7 @@ ${buildCmdFromRoot}
 				'All Files': ['*']
 			},
 			defaultUri: workspaceFolder.uri,
-			openLabel: dependencyName ? `Select file that defines "${dependencyName}"` : 'Select Template File'
+			openLabel: 'Select File'
 		});
 		
 		if (!files || files.length === 0) {
@@ -321,12 +338,12 @@ ${buildCmdFromRoot}
 		const filePath = files[0].fsPath;
 		await previewProvider.addTemplateFile(filePath);
 		
-		vscode.window.showInformationMessage(`Added ${require('path').basename(filePath)} to render context`);
+		showTimedNotification(`Added ${require('path').basename(filePath)} to render context`);
 	});
 	
 	const removeTemplateFileCommand = vscode.commands.registerCommand('goTemplateViewer.removeTemplateFile', async (filePath: string) => {
 		await previewProvider.removeTemplateFile(filePath);
-		vscode.window.showInformationMessage(`Removed ${require('path').basename(filePath)} from render context`);
+		showTimedNotification(`Removed ${require('path').basename(filePath)} from render context`);
 	});
 
 	const linkDataFileCommand = vscode.commands.registerCommand('go-template-viewer.linkDataFile', async (uri?: vscode.Uri) => {
@@ -447,9 +464,13 @@ ${buildCmdFromRoot}
 		// Clear the data file link in preview provider
 		await previewProvider.unlinkDataFile();
 		
+		// Refresh all views
+		renderContextProvider.refresh();
+		variablesProvider.refresh([], undefined); // Clear variables view
+		
 		vscode.window.showInformationMessage('Data file link removed');
 		
-		// Refresh to rebuild variables from templates
+		// Refresh preview to rebuild variables from templates
 		previewProvider.refresh();
 	});
 
@@ -476,6 +497,7 @@ ${buildCmdFromRoot}
 	context.subscriptions.push(
 		openPreviewCommand,
 		refreshPreviewCommand,
+		exportHtmlCommand,
 		editVariableCommand,
 		editDataValueCommand,
 		duplicateArrayItemCommand,

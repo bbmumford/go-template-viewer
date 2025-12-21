@@ -725,11 +725,19 @@ export class DependencyItem extends vscode.TreeItem {
     constructor(public readonly dependency: TemplateDependency) {
         super(dependency.name, vscode.TreeItemCollapsibleState.None);
         
+        const path = require('path');
+        
         // Show satisfaction status
         const status = dependency.satisfied ? '✅' : '❌';
         const typeLabel = dependency.type === 'template' ? 'template' : 'block';
         
-        this.description = `${status} ${typeLabel}`;
+        // Show filename if satisfied
+        if (dependency.satisfied && dependency.providedBy) {
+            const fileName = path.basename(dependency.providedBy);
+            this.description = `${status} ${fileName}`;
+        } else {
+            this.description = `${status} ${typeLabel}`;
+        }
         
         // Build tooltip
         const tooltipParts = [
@@ -827,28 +835,45 @@ export class HtmxDependenciesProvider implements vscode.TreeDataProvider<HtmxDep
             return Promise.resolve(items);
         }
 
-        // If element is an HtmxRequestItem with suggested fragments, return them as children
-        if (element instanceof HtmxRequestItem && element.dependency.suggestedFragments) {
-            const fragmentItems = element.dependency.suggestedFragments.map(fragmentPath => {
-                // Resolve the full path relative to workspace
-                const workspaceFolders = vscode.workspace.workspaceFolders;
-                let fullPath = fragmentPath;
-                
-                if (workspaceFolders && workspaceFolders.length > 0) {
-                    const path = require('path');
-                    fullPath = path.join(workspaceFolders[0].uri.fsPath, fragmentPath);
-                }
-                
-                return new SuggestedFragmentItem(fragmentPath, fullPath);
-            });
-            return Promise.resolve(fragmentItems);
+        // If element is an HtmxRequestItem, show its details and suggested fragments
+        if (element instanceof HtmxRequestItem) {
+            const items: HtmxDependencyItem[] = [];
+            const dep = element.dependency;
+            
+            // Show request details
+            items.push(new HtmxDetailItem('Method', dep.type));
+            if (dep.target) {
+                items.push(new HtmxDetailItem('Target', dep.target));
+            }
+            if (dep.swap) {
+                items.push(new HtmxDetailItem('Swap', dep.swap));
+            }
+            if (dep.trigger) {
+                items.push(new HtmxDetailItem('Trigger', dep.trigger));
+            }
+            
+            return Promise.resolve(items);
         }
 
         return Promise.resolve([]);
     }
 }
 
-type HtmxDependencyItem = HtmxStatusItem | HtmxTypeHeaderItem | HtmxRequestItem | SuggestedFragmentItem;
+// Detail item to show HTMX request properties
+class HtmxDetailItem extends vscode.TreeItem {
+    constructor(
+        label: string,
+        value: string,
+        icon: string = 'info',
+        colorName: string = 'charts.gray'
+    ) {
+        super(`${label}: ${value}`, vscode.TreeItemCollapsibleState.None);
+        this.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor(colorName));
+        this.contextValue = 'htmxDetail';
+    }
+}
+
+type HtmxDependencyItem = HtmxStatusItem | HtmxTypeHeaderItem | HtmxRequestItem | HtmxDetailItem;
 
 class HtmxStatusItem extends vscode.TreeItem {
     constructor(
@@ -905,37 +930,17 @@ class HtmxRequestItem extends vscode.TreeItem {
         const path = require('path');
         const fileName = path.basename(dependency.filePath);
         
-        // Make expandable if there are suggested fragments
-        const hasFragments = dependency.suggestedFragments && dependency.suggestedFragments.length > 0;
-        const collapsibleState = hasFragments ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None;
+        // All HTMX requests are non-collapsible now (no children to show)
+        super(dependency.url, vscode.TreeItemCollapsibleState.None);
         
-        // Create label with URL
-        super(dependency.url, collapsibleState);
-        
-        // Show HTML fragment indicator in description
-        if (dependency.isHtmlFragment) {
-            this.description = `${fileName} • HTML fragment`;
-        } else {
-            this.description = fileName;
-        }
-        
+        this.description = fileName;
         this.tooltip = this.buildTooltip(dependency);
         
-        // Icon based on method type and whether it's HTML
-        let iconName: string;
-        let colorName: string;
+        // Simple icon based on request type
+        const iconName = dependency.type === 'hx-get' ? 'arrow-down' : 'arrow-up';
+        this.iconPath = new vscode.ThemeIcon(iconName, new vscode.ThemeColor('charts.purple'));
         
-        if (dependency.isHtmlFragment) {
-            iconName = 'symbol-snippet'; // HTML fragment icon
-            colorName = 'charts.green';
-        } else {
-            iconName = dependency.type === 'hx-get' ? 'arrow-down' : 'arrow-up';
-            colorName = 'charts.purple';
-        }
-        
-        this.iconPath = new vscode.ThemeIcon(iconName, new vscode.ThemeColor(colorName));
-        
-        this.contextValue = dependency.isHtmlFragment ? 'htmxHtmlRequest' : 'htmxRequest';
+        this.contextValue = 'htmxRequest';
         
         // Make clickable to jump to source
         this.command = {
@@ -954,15 +959,6 @@ class HtmxRequestItem extends vscode.TreeItem {
             `Type: ${dep.type}`,
             `File: ${dep.filePath}:${dep.line}`
         ];
-        
-        if (dep.isHtmlFragment) {
-            parts.push('Returns: HTML Fragment');
-            
-            if (dep.suggestedFragments && dep.suggestedFragments.length > 0) {
-                parts.push(`\nSuggested fragments:`);
-                dep.suggestedFragments.forEach(f => parts.push(`  - ${f}`));
-            }
-        }
         
         if (dep.target) {
             parts.push(`Target: ${dep.target}`);

@@ -22,16 +22,14 @@ type TemplateGraph struct {
 
 // HtmxDependency represents an HTMX request dependency
 type HtmxDependency struct {
-	Type               string   `json:"type"`                         // "hx-get", "hx-post", etc.
-	URL                string   `json:"url"`                          // The endpoint URL
-	Target             string   `json:"target"`                       // hx-target value
-	Swap               string   `json:"swap"`                         // hx-swap value
-	Trigger            string   `json:"trigger"`                      // hx-trigger value
-	FilePath           string   `json:"filePath"`                     // Source file
-	Line               int      `json:"line"`                         // Line number
-	Context            string   `json:"context"`                      // Surrounding context
-	IsHTMLFragment     bool     `json:"isHtmlFragment"`               // Whether this likely returns HTML
-	SuggestedFragments []string `json:"suggestedFragments,omitempty"` // Suggested fragment files
+	Type     string `json:"type"`     // "hx-get", "hx-post", etc.
+	URL      string `json:"url"`      // The endpoint URL
+	Target   string `json:"target"`   // hx-target value
+	Swap     string `json:"swap"`     // hx-swap value
+	Trigger  string `json:"trigger"`  // hx-trigger value
+	FilePath string `json:"filePath"` // Source file
+	Line     int    `json:"line"`     // Line number
+	Context  string `json:"context"`  // Surrounding context
 }
 
 // HtmxInfo contains HTMX analysis results
@@ -68,22 +66,63 @@ type Dependency struct {
 
 // TemplateAnalyzer analyzes Go templates
 type TemplateAnalyzer struct {
-	workspace    string
-	templates    map[string]*TmplDef
-	variables    map[string]*Variable
-	dependencies map[string]*Dependency
-	seenFiles    map[string]bool
-	htmxInfo     *HtmxInfo
+	workspace     string
+	templates     map[string]*TmplDef
+	variables     map[string]*Variable
+	dependencies  map[string]*Dependency
+	seenFiles     map[string]bool
+	htmxInfo      *HtmxInfo
+	rangeLiterals map[string][]string // Maps array path to string literals found in its range block
+}
+
+// getAnalyzerFuncs returns stub functions so the analyzer can parse templates
+// that use custom helper functions. These don't need real implementations -
+// they just need to exist so parsing succeeds.
+func getAnalyzerFuncs() template.FuncMap {
+	// Stub function that accepts any number of args and returns empty interface
+	stub := func(args ...interface{}) interface{} { return nil }
+	stubBool := func(args ...interface{}) bool { return false }
+	stubInt := func(args ...interface{}) int { return 0 }
+	stubStr := func(args ...interface{}) string { return "" }
+	stubSlice := func(args ...interface{}) []int { return nil }
+
+	return template.FuncMap{
+		// Math helpers
+		"add": stubInt, "sub": stubInt, "mul": stubInt, "div": stubInt, "mod": stubInt,
+		// String helpers
+		"upper": stubStr, "lower": stubStr, "title": stubStr, "trim": stubStr,
+		"contains": stubBool, "hasPrefix": stubBool, "hasSuffix": stubBool,
+		"replace": stubStr, "split": stub, "join": stubStr,
+		// Array/slice helpers
+		"isLast": stubBool, "isFirst": stubBool, "seq": stubSlice,
+		// Safe output helpers
+		"safeHTML": stub, "safeJS": stub, "safeCSS": stub, "safeURL": stub,
+		// Conditional helpers
+		"default": stub, "ternary": stub,
+		// Common additional helpers users might have
+		"dict": stub, "list": stub, "slice": stub, "append": stub,
+		"now": stub, "date": stubStr, "dateFormat": stubStr,
+		"json": stubStr, "jsonify": stubStr, "toJSON": stubStr,
+		"html": stubStr, "urlquery": stubStr, "printf": stubStr,
+		"first": stub, "last": stub, "rest": stub, "reverse": stub,
+		"sort": stub, "uniq": stub, "shuffle": stub,
+		"len": stubInt, "isset": stubBool, "empty": stubBool,
+		"pluralize": stubStr, "singularize": stubStr,
+		"markdown": stub, "markdownify": stub,
+		"truncate": stubStr, "wordwrap": stubStr,
+		"attr": stub, "class": stubStr,
+	}
 }
 
 func NewTemplateAnalyzer(workspace string) *TemplateAnalyzer {
 	return &TemplateAnalyzer{
-		workspace:    workspace,
-		templates:    make(map[string]*TmplDef),
-		variables:    make(map[string]*Variable),
-		dependencies: make(map[string]*Dependency),
-		seenFiles:    make(map[string]bool),
-		htmxInfo:     &HtmxInfo{Dependencies: []*HtmxDependency{}},
+		workspace:     workspace,
+		templates:     make(map[string]*TmplDef),
+		variables:     make(map[string]*Variable),
+		dependencies:  make(map[string]*Dependency),
+		seenFiles:     make(map[string]bool),
+		htmxInfo:      &HtmxInfo{Dependencies: []*HtmxDependency{}},
+		rangeLiterals: make(map[string][]string),
 	}
 }
 
@@ -182,6 +221,12 @@ func (a *TemplateAnalyzer) Analyze(entryFile string, files []string) (*TemplateG
 		a.htmxInfo.Detected = true
 	}
 
+	// Check HTMX dependency satisfaction - see if suggested fragments are in included files
+	includedFileSet := make(map[string]bool)
+	for _, f := range files {
+		includedFileSet[f] = true
+	}
+
 	return &TemplateGraph{
 		EntryFile:    entryFile,
 		Templates:    a.templates,
@@ -207,8 +252,8 @@ func (a *TemplateAnalyzer) analyzeFile(filePath string) error {
 	// Detect HTMX usage
 	a.detectHtmx(filePath, contentStr)
 
-	// Parse the template
-	tmpl, err := template.New(filepath.Base(filePath)).Parse(contentStr)
+	// Parse the template with helper function stubs so parsing doesn't fail
+	tmpl, err := template.New(filepath.Base(filePath)).Funcs(getAnalyzerFuncs()).Parse(contentStr)
 	if err != nil {
 		return fmt.Errorf("parse error in %s: %v", filePath, err)
 	}
@@ -254,11 +299,7 @@ func (a *TemplateAnalyzer) walkNode(node parse.Node, filePath string, def *TmplD
 		}
 
 	case *parse.RangeNode:
-		// Extract the array variable being ranged over with special "range-collection" context
-		// This marks it as an array but doesn't prefix child paths
-		a.walkPipe(n.Pipe, filePath, "range-collection")
-
-		// Get the array variable name from the pipe
+		// Get the array variable name from the pipe FIRST
 		arrayPath := ""
 		if n.Pipe != nil && len(n.Pipe.Cmds) > 0 {
 			for _, cmd := range n.Pipe.Cmds {
@@ -273,6 +314,16 @@ func (a *TemplateAnalyzer) walkNode(node parse.Node, filePath string, def *TmplD
 				}
 			}
 		}
+
+		// Extract string literals from this range block BEFORE processing the pipe
+		// This ensures the literals are available when we create the variable
+		if arrayPath != "" {
+			a.extractRangeLiterals(n.List, arrayPath)
+		}
+
+		// NOW extract the array variable with special "range-collection" context
+		// At this point, rangeLiterals[arrayPath] is populated
+		a.walkPipe(n.Pipe, filePath, "range-collection")
 
 		// Pass "range:ArrayName" as context so children know they're inside this array
 		rangeContext := "range"
@@ -325,8 +376,84 @@ func (a *TemplateAnalyzer) walkPipe(pipe *parse.PipeNode, filePath, context stri
 	}
 
 	for _, cmd := range pipe.Cmds {
+		// Check if this is an eq/ne comparison - we want to capture the string literal
+		// so we can properly type the variable and suggest values
+		if len(cmd.Args) >= 3 {
+			if ident, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
+				if ident.Ident == "eq" || ident.Ident == "ne" {
+					// Found eq/ne comparison - look for field + string literal pairs
+					a.extractEqComparison(cmd.Args[1:], filePath, context)
+					continue
+				}
+			}
+		}
+
+		// Standard variable extraction for non-eq calls
 		for _, arg := range cmd.Args {
 			a.extractVariables(arg, filePath, context)
+		}
+	}
+}
+
+// extractEqComparison handles eq/ne function calls to properly type variables
+// When we see {{eq .Field "value"}}, we know .Field should be a string with suggested value "value"
+func (a *TemplateAnalyzer) extractEqComparison(args []parse.Node, filePath, context string) {
+	var fields []*parse.FieldNode
+	var stringLiterals []string
+
+	// Collect all field nodes and string literals from the comparison
+	for _, arg := range args {
+		switch n := arg.(type) {
+		case *parse.FieldNode:
+			fields = append(fields, n)
+		case *parse.StringNode:
+			stringLiterals = append(stringLiterals, n.Text)
+		case *parse.PipeNode:
+			// Recursively handle nested pipes
+			a.walkPipe(n, filePath, context)
+		}
+	}
+
+	// For each field being compared, if there's a string literal, use it as suggested value
+	for _, field := range fields {
+		path := strings.Join(field.Ident, ".")
+		if path == "" {
+			continue
+		}
+
+		// Handle range context prefix
+		if strings.HasPrefix(context, "range:") {
+			arrayName := strings.TrimPrefix(context, "range:")
+			path = arrayName + "[0]." + path
+		} else if context == "range" {
+			continue // Skip if we can't determine array name
+		}
+
+		// Use "eq-string" context to indicate this is a string comparison
+		key := path + "::eq-string"
+		if _, exists := a.variables[key]; !exists {
+			// Use the first string literal as suggested value, or empty string
+			suggested := ""
+			if len(stringLiterals) > 0 {
+				suggested = stringLiterals[0]
+			}
+
+			a.variables[key] = &Variable{
+				Path:      path,
+				Type:      "string", // Always string when compared with eq to a string literal
+				Context:   "eq-string",
+				FilePath:  filePath,
+				Suggested: suggested,
+			}
+		}
+	}
+
+	// Also extract any remaining variables that weren't string comparisons
+	for _, arg := range args {
+		if _, ok := arg.(*parse.FieldNode); !ok {
+			if _, ok := arg.(*parse.StringNode); !ok {
+				a.extractVariables(arg, filePath, context)
+			}
 		}
 	}
 }
@@ -391,11 +518,84 @@ func (a *TemplateAnalyzer) extractVariables(node parse.Node, filePath, context s
 	}
 }
 
+// extractRangeLiterals extracts string literals from comparison operations in a range block
+// This helps populate arrays with meaningful test data (e.g., ["google", "github", "email"])
+func (a *TemplateAnalyzer) extractRangeLiterals(node parse.Node, arrayPath string) {
+	if node == nil {
+		return
+	}
+
+	switch n := node.(type) {
+	case *parse.ListNode:
+		if n != nil {
+			for _, child := range n.Nodes {
+				a.extractRangeLiterals(child, arrayPath)
+			}
+		}
+	case *parse.IfNode:
+		// Check for eq comparisons in the pipe
+		a.extractLiteralsFromPipe(n.Pipe, arrayPath)
+		a.extractRangeLiterals(n.List, arrayPath)
+		if n.ElseList != nil {
+			a.extractRangeLiterals(n.ElseList, arrayPath)
+		}
+	case *parse.ActionNode:
+		a.extractLiteralsFromPipe(n.Pipe, arrayPath)
+	case *parse.BranchNode:
+		a.extractLiteralsFromPipe(n.Pipe, arrayPath)
+		a.extractRangeLiterals(n.List, arrayPath)
+		if n.ElseList != nil {
+			a.extractRangeLiterals(n.ElseList, arrayPath)
+		}
+	case *parse.RangeNode:
+		// Don't recurse into nested ranges
+		return
+	}
+}
+
+// extractLiteralsFromPipe finds string literals in eq/ne comparisons
+func (a *TemplateAnalyzer) extractLiteralsFromPipe(pipe *parse.PipeNode, arrayPath string) {
+	if pipe == nil {
+		return
+	}
+
+	for _, cmd := range pipe.Cmds {
+		// Look for eq, ne functions with string arguments
+		if len(cmd.Args) > 0 {
+			if ident, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
+				if ident.Ident == "eq" || ident.Ident == "ne" {
+					// Extract string literals from the arguments
+					for _, arg := range cmd.Args[1:] {
+						if str, ok := arg.(*parse.StringNode); ok {
+							// Found a string literal
+							literals := a.rangeLiterals[arrayPath]
+							// Avoid duplicates
+							found := false
+							for _, existing := range literals {
+								if existing == str.Text {
+									found = true
+									break
+								}
+							}
+							if !found {
+								a.rangeLiterals[arrayPath] = append(literals, str.Text)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func (a *TemplateAnalyzer) inferType(context, path string) string {
 	// Context tells us WHERE the variable appears, not necessarily its type
-	// We should infer type from the path structure, not just the context
+	// We should infer type from the path structure AND the usage context
 
 	switch context {
+	case "eq-string":
+		// Variable is compared with eq to a string literal - it's a string
+		return "string"
 	case "range":
 		// Variables accessed inside a range block are fields of the array item
 		// Check if this is an array item field (e.g., "BrandApps[0].Domain")
@@ -416,19 +616,22 @@ func (a *TemplateAnalyzer) inferType(context, path string) string {
 		return "array"
 	case "if", "with":
 		// Variables in if/with are tested for truthiness
-		// But they could be any type - don't force bool_or_object
-		// Instead, infer from path structure
-		if strings.Contains(path, ".") {
-			return "object"
-		}
-		// Top-level fields in if/with could be bool, string, array, etc.
-		// Default to empty string which is falsy but flexible
+		// If path has a dot, it's accessing a nested field - but the LEAF value
+		// is likely a string/bool, not an object. Only mark as object if it's
+		// clearly used as one (e.g., passed to template, has fields accessed from it)
+		// For now, default to string for leaf fields
 		return "string"
-	default:
-		// Field access - infer from path structure
+	case "template":
+		// Variable passed to a template call - likely an object being passed as context
 		if strings.Contains(path, ".") {
-			return "object"
+			// Nested path - the leaf is what's being passed
+			return "string"
 		}
+		// Top-level variable passed to template is usually an object
+		return "object"
+	default:
+		// Field access in output context (e.g., {{.User.Name}})
+		// The leaf value is what gets rendered - typically a string
 		return "string"
 	}
 }
@@ -436,30 +639,26 @@ func (a *TemplateAnalyzer) inferType(context, path string) string {
 func (a *TemplateAnalyzer) suggestValue(varType, path string) interface{} {
 	switch varType {
 	case "array":
+		// Check if we collected string literals for this array from range comparisons
+		if literals, ok := a.rangeLiterals[path]; ok && len(literals) > 0 {
+			// Return array of the actual string values found in comparisons
+			result := make([]interface{}, len(literals))
+			for i, lit := range literals {
+				result[i] = lit
+			}
+			return result
+		}
 		// Generate a minimal array with one empty item to allow iteration
 		return []map[string]interface{}{
 			{},
 		}
 	case "object":
-		// Build nested object structure based on path
-		parts := strings.Split(path, ".")
-		if len(parts) > 1 {
-			// Create nested structure
-			result := make(map[string]interface{})
-			current := result
-
-			for i := 0; i < len(parts)-1; i++ {
-				next := make(map[string]interface{})
-				current[parts[i]] = next
-				current = next
-			}
-			// Set the final field to empty string as placeholder
-			current[parts[len(parts)-1]] = ""
-
-			return result
-		}
+		// Return an empty object - the structure will be built by setDeep in the extension
+		// based on the actual path. Don't try to pre-build nested structures here
+		// as that causes double-nesting issues.
 		return map[string]interface{}{}
 	default:
+		// For strings and other types, return empty string as placeholder
 		return ""
 	}
 }
@@ -559,25 +758,10 @@ func (a *TemplateAnalyzer) detectHtmx(filePath string, content string) {
 					dep.Trigger = triggerMatch[1]
 				}
 
-				// Extract hx-sync if present in context
-				hxSync := ""
-				syncRe := regexp.MustCompile(`hx-sync\s*=\s*["']([^"']+)["']`)
-				if syncMatch := syncRe.FindStringSubmatch(contextLines); len(syncMatch) > 1 {
-					hxSync = syncMatch[1]
-				}
-
 				// Get some context (trimmed line)
 				dep.Context = strings.TrimSpace(line)
 				if len(dep.Context) > 100 {
 					dep.Context = dep.Context[:97] + "..."
-				}
-
-				// Determine if this is likely an HTML fragment endpoint
-				dep.IsHTMLFragment = a.isLikelyHTMLEndpoint(url, attr, dep.Swap, hxSync)
-
-				// Suggest possible fragment files if this returns HTML
-				if dep.IsHTMLFragment {
-					dep.SuggestedFragments = a.suggestFragmentFiles(url, a.workspace)
 				}
 
 				a.htmxInfo.Dependencies = append(a.htmxInfo.Dependencies, dep)
@@ -585,87 +769,4 @@ func (a *TemplateAnalyzer) detectHtmx(filePath string, content string) {
 			}
 		}
 	}
-}
-
-// isLikelyHTMLEndpoint determines if an HTMX request is likely to return HTML
-func (a *TemplateAnalyzer) isLikelyHTMLEndpoint(url, method, swap, hxSync string) bool {
-	// Check for explicit "none" swap - definitely NOT HTML
-	if swap == "none" {
-		return false
-	}
-
-	// hx-sync with "this:replace" indicates HTML replacement
-	if strings.Contains(hxSync, "this:replace") {
-		return true
-	}
-
-	// Check swap methods that explicitly insert HTML
-	htmlSwapMethods := []string{"innerHTML", "outerHTML", "beforebegin", "afterbegin", "beforeend", "afterend"}
-	for _, swapMethod := range htmlSwapMethods {
-		if strings.Contains(swap, swapMethod) {
-			return true
-		}
-	}
-
-	// Check URL patterns that suggest HTML fragments
-	htmlPatterns := []string{
-		"/fragment", "/partial", "/component",
-		"/render", "/html", "/view",
-		"_fragment", "_partial", "_component",
-	}
-
-	urlLower := strings.ToLower(url)
-	for _, pattern := range htmlPatterns {
-		if strings.Contains(urlLower, pattern) {
-			return true
-		}
-	}
-
-	// hx-get with no explicit swap=none is likely HTML (default is innerHTML)
-	// but be conservative - only if there's some indication
-	if method == "hx-get" && swap != "" && swap != "none" {
-		return true
-	}
-
-	return false
-}
-
-// suggestFragmentFiles suggests possible template files for an HTMX endpoint
-func (a *TemplateAnalyzer) suggestFragmentFiles(url, workspaceRoot string) []string {
-	suggestions := []string{}
-
-	// Extract the last path segment as potential file name
-	parts := strings.Split(strings.Trim(url, "/"), "/")
-	if len(parts) == 0 {
-		return suggestions
-	}
-
-	lastPart := parts[len(parts)-1]
-
-	// Remove query parameters and template variables
-	lastPart = strings.Split(lastPart, "?")[0]
-	lastPart = strings.ReplaceAll(lastPart, "{{", "")
-	lastPart = strings.ReplaceAll(lastPart, "}}", "")
-	lastPart = strings.TrimSpace(lastPart)
-
-	if lastPart == "" {
-		return suggestions
-	}
-
-	// Common fragment/partial directory patterns
-	// Don't use specific filenames - just suggest directories where fragments might be
-	patterns := []string{
-		"fragments/",
-		"partials/",
-		"components/",
-		"templates/fragments/",
-		"templates/partials/",
-		"templates/components/",
-		"views/fragments/",
-		"views/partials/",
-	}
-
-	suggestions = append(suggestions, patterns...)
-
-	return suggestions
 }
