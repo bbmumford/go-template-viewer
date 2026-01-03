@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -109,6 +110,19 @@ func runRender(entryFile, dataSource, workspace, templateName, filesArg string) 
 		for i := range files {
 			files[i] = strings.TrimSpace(files[i])
 		}
+	}
+
+	// Run validation first to collect all type mismatch errors at root level
+	// This skips fields inside range/with blocks to avoid false positives
+	validationErrors := renderer.ValidateData(entryFile, data, files)
+	if len(validationErrors) > 0 {
+		// Output all validation errors as a combined error message
+		var errMsgs []string
+		for _, ve := range validationErrors {
+			errMsgs = append(errMsgs, fmt.Sprintf("template: %s:%d:%d: %s",
+				filepath.Base(ve.File), ve.Line, ve.Column, ve.Message))
+		}
+		return fmt.Errorf("validation errors:\n%s", strings.Join(errMsgs, "\n"))
 	}
 
 	output, err := renderer.Render(entryFile, data, templateName, files)

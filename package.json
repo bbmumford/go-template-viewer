@@ -2,7 +2,7 @@
   "name": "go-template-viewer",
   "displayName": "Go Template Viewer",
   "description": "Live preview and development tool for Go templates with multi-file support, variable tracking, and dependency management",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "bbmumford",
   "author": {
     "name": "Brandon Miller-Mumford"
@@ -88,6 +88,16 @@
         "icon": "$(add)"
       },
       {
+        "command": "goTemplateViewer.setBaseTemplate",
+        "title": "Go Template: Set as Base Template",
+        "icon": "$(home)"
+      },
+      {
+        "command": "goTemplateViewer.addToContext",
+        "title": "Go Template: Add to Context",
+        "icon": "$(add)"
+      },
+      {
         "command": "goTemplateViewer.exportHtml",
         "title": "Export Preview as HTML",
         "icon": "$(save)"
@@ -151,6 +161,16 @@
           "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
           "group": "navigation",
           "icon": "$(open-preview)"
+        },
+        {
+          "command": "goTemplateViewer.setBaseTemplate",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
+          "group": "goTemplate@1"
+        },
+        {
+          "command": "goTemplateViewer.addToContext",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/ && goTemplatePreviewActive",
+          "group": "goTemplate@2"
         }
       ],
       "editor/title": [

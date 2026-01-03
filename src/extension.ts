@@ -7,13 +7,12 @@ import { GoTemplatePreviewProvider } from './previewProvider';
 import { RenderContextProvider, TemplateVariablesProvider, TemplateDependenciesProvider, VariableItem } from './templateViewProviders';
 
 // Auto-dismissing notification helper (5 second timeout)
-function showTimedNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+function showTimedNotification(message: string, _type: 'info' | 'warning' | 'error' = 'info'): void {
     const timeout = 5000;
     vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, cancellable: false },
         async (progress) => {
-            const icon = type === 'error' ? '$(error)' : type === 'warning' ? '$(warning)' : '$(info)';
-            progress.report({ message: `${icon} ${message}` });
+            progress.report({ message });
             await new Promise(resolve => setTimeout(resolve, timeout));
         }
     );
@@ -346,6 +345,60 @@ ${buildCmdFromRoot}
 		showTimedNotification(`Removed ${require('path').basename(filePath)} from render context`);
 	});
 
+	// Set as Base Template - right-click menu command
+	const setBaseTemplateCommand = vscode.commands.registerCommand('goTemplateViewer.setBaseTemplate', async (uri?: vscode.Uri) => {
+		if (!uri) {
+			showTimedNotification('No file selected', 'error');
+			return;
+		}
+
+		const fileName = uri.fsPath;
+		const isTemplateFile = /\.(html|tmpl|tpl|gohtml)$/.test(fileName);
+		
+		if (!isTemplateFile) {
+			showTimedNotification('Selected file is not a template file', 'warning');
+			return;
+		}
+
+		try {
+			// Reset context and open preview with this file as the base/entry template
+			await previewProvider.openPreview(uri, true);
+			showTimedNotification(`Set ${path.basename(fileName)} as base template`);
+		} catch (error) {
+			showTimedNotification(`Error setting base template: ${error}`, 'error');
+		}
+	});
+
+	// Add to Context - right-click menu command (only available when preview is active)
+	const addToContextCommand = vscode.commands.registerCommand('goTemplateViewer.addToContext', async (uri?: vscode.Uri) => {
+		if (!uri) {
+			showTimedNotification('No file selected', 'error');
+			return;
+		}
+
+		const fileName = uri.fsPath;
+		const isTemplateFile = /\.(html|tmpl|tpl|gohtml)$/.test(fileName);
+		
+		if (!isTemplateFile) {
+			showTimedNotification('Selected file is not a template file', 'warning');
+			return;
+		}
+
+		// Check if the file is already in context
+		const includedFiles = previewProvider.getIncludedFiles();
+		if (includedFiles.includes(fileName)) {
+			showTimedNotification(`${path.basename(fileName)} is already in context`, 'info');
+			return;
+		}
+
+		try {
+			await previewProvider.addTemplateFile(fileName);
+			showTimedNotification(`Added ${path.basename(fileName)} to context`);
+		} catch (error) {
+			showTimedNotification(`Error adding to context: ${error}`, 'error');
+		}
+	});
+
 	const linkDataFileCommand = vscode.commands.registerCommand('go-template-viewer.linkDataFile', async (uri?: vscode.Uri) => {
 		let fileUri = uri;
 		
@@ -508,6 +561,8 @@ ${buildCmdFromRoot}
 		manageDataFileCommand,
 		addTemplateFileCommand,
 		removeTemplateFileCommand,
+		setBaseTemplateCommand,
+		addToContextCommand,
 		linkDataFileCommand,
 		removeDataFileCommand,
 		documentSaveWatcher,
@@ -528,6 +583,8 @@ ${buildCmdFromRoot}
 	console.log('  - goTemplateViewer.manageDataFile');
 	console.log('  - goTemplateViewer.addTemplateFile');
 	console.log('  - goTemplateViewer.removeTemplateFile');
+	console.log('  - goTemplateViewer.setBaseTemplate');
+	console.log('  - goTemplateViewer.addToContext');
 	console.log('  - go-template-viewer.linkDataFile');
 	console.log('Views registered:');
 	console.log('  - goTemplateRenderContext');
@@ -535,9 +592,9 @@ ${buildCmdFromRoot}
 	console.log('  - goTemplateDependencies');
 	console.log('='.repeat(60));
 	
-	// Show welcome message only if helper exists
+	// Show welcome message only if helper exists (auto-dismisses after 5 seconds)
 	if (helperExists) {
-		vscode.window.showInformationMessage('Go Template Viewer is ready! Right-click on a template file to open preview.');
+		showTimedNotification('Go Template Viewer is ready! Right-click on a template file to open preview.');
 	}
 }
 

@@ -149,6 +149,7 @@ func (a *TemplateAnalyzer) Analyze(entryFile string, files []string) (*TemplateG
 	}
 
 	// Convert maps to slices and deduplicate redundant variables
+	// Priority: eq-number, eq-string, gt-number (comparison contexts) > generic contexts
 	vars := make([]Variable, 0, len(a.variables))
 
 	// First, collect all array item field paths (e.g., "ArrayName[0].FieldName")
@@ -173,8 +174,60 @@ func (a *TemplateAnalyzer) Analyze(entryFile string, files []string) (*TemplateG
 		}
 	}
 
-	// Now collect variables, skipping any that are redundant
+	// Deduplicate by path, giving priority to specific comparison contexts
+	// This ensures that if a variable appears in both {{eq .Field 30}} and {{.Field}},
+	// we use the type from the comparison (number) not generic extraction (string)
+	pathToVar := make(map[string]*Variable)
+	priorityContexts := map[string]int{
+		"eq-number":        10, // Highest priority - explicit numeric comparison
+		"gt-number":        10,
+		"eq-string":        9, // String comparison
+		"range-collection": 8, // Array being ranged over
+		"range":            5, // Inside a range
+		"if":               3,
+		"with":             3,
+		"template":         2,
+		"chain":            1, // $.X access
+		"":                 0, // Generic/default
+	}
+
 	for _, v := range a.variables {
+		existing, exists := pathToVar[v.Path]
+		if !exists {
+			varCopy := *v
+			pathToVar[v.Path] = &varCopy
+		} else {
+			// Compare priorities - higher priority wins
+			existingPriority := priorityContexts[existing.Context]
+			newPriority := priorityContexts[v.Context]
+			if newPriority > existingPriority {
+				varCopy := *v
+				pathToVar[v.Path] = &varCopy
+			}
+		}
+	}
+
+	// Recalculate suggested values for arrays now that all item fields are known
+	// This ensures arrays with item fields get object suggestions, not string literals
+	for path, v := range pathToVar {
+		if v.Type == "array" {
+			// Check if this array has item fields
+			hasItemFields := false
+			for otherPath := range pathToVar {
+				if strings.HasPrefix(otherPath, path+"[0].") {
+					hasItemFields = true
+					break
+				}
+			}
+			if hasItemFields {
+				// Override suggested value to be array of objects
+				v.Suggested = []map[string]interface{}{{}}
+			}
+		}
+	}
+
+	// Now collect variables, skipping any that are redundant
+	for _, v := range pathToVar {
 		skip := false
 
 		// Never skip array variables that are the range collection itself
@@ -376,19 +429,24 @@ func (a *TemplateAnalyzer) walkPipe(pipe *parse.PipeNode, filePath, context stri
 	}
 
 	for _, cmd := range pipe.Cmds {
-		// Check if this is an eq/ne comparison - we want to capture the string literal
+		// Check if this is a comparison function - we want to capture the literal
 		// so we can properly type the variable and suggest values
 		if len(cmd.Args) >= 3 {
 			if ident, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
-				if ident.Ident == "eq" || ident.Ident == "ne" {
-					// Found eq/ne comparison - look for field + string literal pairs
+				switch ident.Ident {
+				case "eq", "ne":
+					// String comparison - look for field + string literal pairs
 					a.extractEqComparison(cmd.Args[1:], filePath, context)
+					continue
+				case "gt", "lt", "ge", "le":
+					// Numeric comparison - look for field + number literal pairs
+					a.extractNumericComparison(cmd.Args[1:], filePath, context)
 					continue
 				}
 			}
 		}
 
-		// Standard variable extraction for non-eq calls
+		// Standard variable extraction for non-comparison calls
 		for _, arg := range cmd.Args {
 			a.extractVariables(arg, filePath, context)
 		}
@@ -399,22 +457,35 @@ func (a *TemplateAnalyzer) walkPipe(pipe *parse.PipeNode, filePath, context stri
 // When we see {{eq .Field "value"}}, we know .Field should be a string with suggested value "value"
 func (a *TemplateAnalyzer) extractEqComparison(args []parse.Node, filePath, context string) {
 	var fields []*parse.FieldNode
+	var chainNodes []*parse.ChainNode
 	var stringLiterals []string
+	var numberLiterals []int64
 
-	// Collect all field nodes and string literals from the comparison
+	// Collect all field nodes, chain nodes, string literals, and number literals from the comparison
 	for _, arg := range args {
 		switch n := arg.(type) {
 		case *parse.FieldNode:
 			fields = append(fields, n)
+		case *parse.ChainNode:
+			chainNodes = append(chainNodes, n)
 		case *parse.StringNode:
 			stringLiterals = append(stringLiterals, n.Text)
+		case *parse.NumberNode:
+			if n.IsInt {
+				numberLiterals = append(numberLiterals, n.Int64)
+			} else if n.IsFloat {
+				numberLiterals = append(numberLiterals, int64(n.Float64))
+			}
 		case *parse.PipeNode:
 			// Recursively handle nested pipes
 			a.walkPipe(n, filePath, context)
 		}
 	}
 
-	// For each field being compared, if there's a string literal, use it as suggested value
+	// Determine the comparison type based on what literals we found
+	isNumericComparison := len(numberLiterals) > 0 && len(stringLiterals) == 0
+
+	// For each field being compared, extract with appropriate type
 	for _, field := range fields {
 		path := strings.Join(field.Ident, ".")
 		if path == "" {
@@ -429,29 +500,163 @@ func (a *TemplateAnalyzer) extractEqComparison(args []parse.Node, filePath, cont
 			continue // Skip if we can't determine array name
 		}
 
-		// Use "eq-string" context to indicate this is a string comparison
-		key := path + "::eq-string"
+		if isNumericComparison {
+			// Numeric comparison: eq .Field 30
+			key := path + "::eq-number"
+			if _, exists := a.variables[key]; !exists {
+				suggested := int64(0)
+				if len(numberLiterals) > 0 {
+					suggested = numberLiterals[0]
+				}
+
+				a.variables[key] = &Variable{
+					Path:      path,
+					Type:      "number",
+					Context:   "eq-number",
+					FilePath:  filePath,
+					Suggested: suggested,
+				}
+			}
+		} else {
+			// String comparison: eq .Field "value"
+			key := path + "::eq-string"
+			if _, exists := a.variables[key]; !exists {
+				suggested := ""
+				if len(stringLiterals) > 0 {
+					suggested = stringLiterals[0]
+				}
+
+				a.variables[key] = &Variable{
+					Path:      path,
+					Type:      "string",
+					Context:   "eq-string",
+					FilePath:  filePath,
+					Suggested: suggested,
+				}
+			}
+		}
+	}
+
+	// Handle chain nodes (like $.CurrentContext.ID) - these are root-level even in range context
+	for _, chain := range chainNodes {
+		// ChainNode has a base Node and Field slice
+		if len(chain.Field) > 0 {
+			// Build the path from the chain fields
+			path := strings.Join(chain.Field, ".")
+
+			if isNumericComparison {
+				key := path + "::eq-number"
+				if _, exists := a.variables[key]; !exists {
+					suggested := int64(0)
+					if len(numberLiterals) > 0 {
+						suggested = numberLiterals[0]
+					}
+
+					a.variables[key] = &Variable{
+						Path:      path,
+						Type:      "number",
+						Context:   "eq-number",
+						FilePath:  filePath,
+						Suggested: suggested,
+					}
+				}
+			} else {
+				// Chain nodes with $ prefix are root-level, so don't add range prefix
+				key := path + "::eq-string"
+				if _, exists := a.variables[key]; !exists {
+					suggested := ""
+					if len(stringLiterals) > 0 {
+						suggested = stringLiterals[0]
+					}
+
+					a.variables[key] = &Variable{
+						Path:      path,
+						Type:      "string",
+						Context:   "eq-string",
+						FilePath:  filePath,
+						Suggested: suggested,
+					}
+				}
+			}
+		}
+	}
+
+	// Also extract any remaining variables that weren't handled above
+	for _, arg := range args {
+		if _, ok := arg.(*parse.FieldNode); !ok {
+			if _, ok := arg.(*parse.StringNode); !ok {
+				if _, ok := arg.(*parse.ChainNode); !ok {
+					if _, ok := arg.(*parse.NumberNode); !ok {
+						a.extractVariables(arg, filePath, context)
+					}
+				}
+			}
+		}
+	}
+}
+
+// extractNumericComparison handles gt/lt/ge/le function calls to properly type variables
+// When we see {{gt .Field 10}}, we know .Field should be a number with suggested value 10
+func (a *TemplateAnalyzer) extractNumericComparison(args []parse.Node, filePath, context string) {
+	var fields []*parse.FieldNode
+	var numberLiterals []int64
+
+	// Collect all field nodes and number literals from the comparison
+	for _, arg := range args {
+		switch n := arg.(type) {
+		case *parse.FieldNode:
+			fields = append(fields, n)
+		case *parse.NumberNode:
+			if n.IsInt {
+				numberLiterals = append(numberLiterals, n.Int64)
+			} else if n.IsFloat {
+				// Treat floats as integers for suggestion purposes
+				numberLiterals = append(numberLiterals, int64(n.Float64))
+			}
+		case *parse.PipeNode:
+			// Recursively handle nested pipes
+			a.walkPipe(n, filePath, context)
+		}
+	}
+
+	// For each field being compared, use the number literal as suggested value
+	for _, field := range fields {
+		path := strings.Join(field.Ident, ".")
+		if path == "" {
+			continue
+		}
+
+		// Handle range context prefix
+		if strings.HasPrefix(context, "range:") {
+			arrayName := strings.TrimPrefix(context, "range:")
+			path = arrayName + "[0]." + path
+		} else if context == "range" {
+			continue // Skip if we can't determine array name
+		}
+
+		// Use "gt-number" context to indicate this is a numeric comparison
+		key := path + "::gt-number"
 		if _, exists := a.variables[key]; !exists {
-			// Use the first string literal as suggested value, or empty string
-			suggested := ""
-			if len(stringLiterals) > 0 {
-				suggested = stringLiterals[0]
+			// Use the first number literal as suggested value, or 0
+			var suggested int64 = 0
+			if len(numberLiterals) > 0 {
+				suggested = numberLiterals[0]
 			}
 
 			a.variables[key] = &Variable{
 				Path:      path,
-				Type:      "string", // Always string when compared with eq to a string literal
-				Context:   "eq-string",
+				Type:      "number", // Always number when compared with gt/lt/ge/le
+				Context:   "gt-number",
 				FilePath:  filePath,
 				Suggested: suggested,
 			}
 		}
 	}
 
-	// Also extract any remaining variables that weren't string comparisons
+	// Also extract any remaining variables that weren't numeric comparisons
 	for _, arg := range args {
 		if _, ok := arg.(*parse.FieldNode); !ok {
-			if _, ok := arg.(*parse.StringNode); !ok {
+			if _, ok := arg.(*parse.NumberNode); !ok {
 				a.extractVariables(arg, filePath, context)
 			}
 		}
@@ -507,6 +712,28 @@ func (a *TemplateAnalyzer) extractVariables(node parse.Node, filePath, context s
 		}
 
 	case *parse.ChainNode:
+		// Chain nodes like $.CurrentContext.ID have a base node and field chain
+		// The $ means root context, so we extract the field path without range prefix
+		if len(n.Field) > 0 {
+			path := strings.Join(n.Field, ".")
+			if path != "" {
+				// Chain nodes ($.X) are always root-level, even inside range blocks
+				key := path + "::chain"
+				if _, exists := a.variables[key]; !exists {
+					varType := a.inferType("chain", path)
+					suggested := a.suggestValue(varType, path)
+
+					a.variables[key] = &Variable{
+						Path:      path,
+						Type:      varType,
+						Context:   "chain",
+						FilePath:  filePath,
+						Suggested: suggested,
+					}
+				}
+			}
+		}
+		// Also process the base node
 		a.extractVariables(n.Node, filePath, context)
 
 	case *parse.PipeNode:
@@ -639,7 +866,26 @@ func (a *TemplateAnalyzer) inferType(context, path string) string {
 func (a *TemplateAnalyzer) suggestValue(varType, path string) interface{} {
 	switch varType {
 	case "array":
+		// Check if this array has item fields (e.g., path[0].Field)
+		// If so, we need to return an array of objects, not strings
+		hasItemFields := false
+		for key := range a.variables {
+			if strings.HasPrefix(key, path+"[0].") {
+				hasItemFields = true
+				break
+			}
+		}
+
+		if hasItemFields {
+			// Array items are objects with fields - return empty object
+			// The fields will be populated by setDeep in the extension
+			return []map[string]interface{}{
+				{},
+			}
+		}
+
 		// Check if we collected string literals for this array from range comparisons
+		// This is for simple arrays like {{range .Tags}}{{if eq . "featured"}}
 		if literals, ok := a.rangeLiterals[path]; ok && len(literals) > 0 {
 			// Return array of the actual string values found in comparisons
 			result := make([]interface{}, len(literals))
@@ -657,6 +903,12 @@ func (a *TemplateAnalyzer) suggestValue(varType, path string) interface{} {
 		// based on the actual path. Don't try to pre-build nested structures here
 		// as that causes double-nesting issues.
 		return map[string]interface{}{}
+	case "number":
+		// Return 0 as default numeric value
+		return 0
+	case "bool":
+		// Return false as default boolean value
+		return false
 	default:
 		// For strings and other types, return empty string as placeholder
 		return ""

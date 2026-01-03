@@ -2,6 +2,29 @@
 
 All notable changes to the Go Template Viewer extension.
 
+## [0.0.4] - 2026-01-03
+
+### Added
+- **Context Menu Commands**: Right-click on template files in Explorer to:
+  - **"Set as Base Template"**: Opens preview with selected file as the entry template (resets context)
+  - **"Add to Context"**: Adds file to current render context without changing base template (only visible when preview is active)
+- **Numeric Comparison Type Inference**: Variables used in `eq`, `ne`, `gt`, `lt`, `ge`, `le` comparisons with number literals (e.g., `{{if eq .SessionTimeout 30}}`, `{{if gt .TotalPages 1}}`) are now correctly inferred as "number" type with proper default values
+- **ChainNode Variable Extraction**: Root-level variables accessed via `$` inside range blocks (e.g., `{{eq $.CurrentContext.ID .ID}}`) are now properly extracted as top-level variables instead of being prefixed with the array path
+- **Pre-Render Validation**: Template data is validated against template expectations before rendering - all type mismatches are collected and reported together instead of failing on the first error (skips fields inside range/with blocks to avoid false positives)
+- **Enhanced Error Display**: Error preview now shows all errors in a formatted list with file:line:column locations, hints for fixing type mismatches, and resolves template names (like "content") to their actual source files
+- **Flexible Type Comparison Functions**: Custom `eq`, `ne`, `lt`, `le`, `gt`, `ge` functions that automatically coerce JSON `float64` to match Go `int` template literals - fixes "incompatible types for comparison" errors caused by JSON number parsing
+- **Safe `slice` Function**: The `slice` helper now handles empty strings and out-of-range indices gracefully, returning an empty string instead of panicking (e.g., `{{slice .Name 0 1}}` on empty Name works)
+
+### Fixed
+- **`isLast` Helper Signature**: Fixed `isLast` function to accept `(index, slice)` instead of `(index, length)` - now works correctly with `{{if isLast $index $.Items}}` pattern
+- **Number Type Default Values**: `suggestValue()` now returns `0` for number types and `false` for boolean types instead of empty strings, preventing "incompatible types for comparison" errors
+- **Numeric Comparison Rendering**: Templates using `{{gt .Field 90}}` or similar numeric comparisons no longer fail with type mismatch errors
+- **Type Mismatch Auto-Correction**: When loading existing data files, any string values are automatically converted to proper types (numbers, booleans) when template usage indicates a non-string type - fixes persistent "incompatible types" errors from old data files
+- **Notification Display**: Removed raw codicon text (`$(error)`, `$(info)`) from auto-dismissing notifications - messages now display cleanly
+- **Startup Notification**: The "Go Template Viewer is ready!" welcome message now auto-dismisses after 5 seconds instead of requiring manual dismissal
+- **Template Name Resolution in Errors**: Errors referencing defined template names like "content" are now mapped to their actual source files in both the Problems panel and error preview
+- **JSON Number Type Handling**: Fixed fundamental issue where JSON-parsed numbers (`float64`) couldn't be compared with Go template integer literals - all comparison operations now handle type coercion automatically
+
 ## [0.0.3] - 2025-12-18
 
 ### Added
@@ -88,11 +111,3 @@ All notable changes to the Go Template Viewer extension.
 - `goTemplateViewer.contentRoot`: Set static asset directory
 
 ---
-
-## Fut`ure Releases`
-
-### Planned Features
-- [ ] Custom template function support
-- [ ] Template validation and error highlighting
-- [ ] Dependency graph visualization
-- [ ] Export rendered templates as static HTML

@@ -8,13 +8,12 @@ import { TemplateData, TemplateAnalysisResult, TemplateVariable, TemplateDepende
 const execFileAsync = promisify(execFile);
 
 // Auto-dismissing notification helper (5 second timeout)
-function showTimedNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+function showTimedNotification(message: string, _type: 'info' | 'warning' | 'error' = 'info'): void {
     const timeout = 5000;
     vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, cancellable: false },
         async (progress) => {
-            const icon = type === 'error' ? '$(error)' : type === 'warning' ? '$(warning)' : '$(info)';
-            progress.report({ message: `${icon} ${message}` });
+            progress.report({ message });
             await new Promise(resolve => setTimeout(resolve, timeout));
         }
     );
@@ -340,21 +339,33 @@ export class GoTemplatePreviewProvider {
                 }
             } else {
                 // Template data exists with linked file - merge in any NEW variables from newly added templates
-                let hasNewVariables = false;
+                // Also fix type mismatches (e.g., string "" should become number 0 for numeric comparisons)
+                let hasChanges = false;
                 
                 for (const variable of allVars) {
                     const path = variable.path.replace(/^\./, ''); // Remove leading dot
                     const currentValue = this.getDeep(this.templateData, path);
                     
-                    // Only add if variable doesn't exist yet and we have a suggested value
+                    // Add if variable doesn't exist yet and we have a suggested value
                     if (currentValue === undefined && variable.suggested !== undefined) {
                         this.setDeep(this.templateData, path, variable.suggested);
-                        hasNewVariables = true;
+                        hasChanges = true;
+                    }
+                    // Fix type mismatches: if current value is a string but should be a number
+                    // This handles both empty strings and incorrect string values from previous inference
+                    else if (typeof currentValue === 'string' && variable.type === 'number' && variable.suggested !== undefined) {
+                        this.setDeep(this.templateData, path, variable.suggested);
+                        hasChanges = true;
+                    }
+                    // Fix type mismatches: if current value is a string but should be a boolean
+                    else if (typeof currentValue === 'string' && variable.type === 'bool' && variable.suggested !== undefined) {
+                        this.setDeep(this.templateData, path, variable.suggested);
+                        hasChanges = true;
                     }
                 }
                 
-                // Save the updated data if we added new variables
-                if (hasNewVariables) {
+                // Save the updated data if we made changes
+                if (hasChanges) {
                     await this.saveTemplateData(this.templateData);
                 }
             }
@@ -403,29 +414,50 @@ export class GoTemplatePreviewProvider {
             return;
         }
 
+        // Build a map of template names to file paths
+        // This resolves names like "content" to their actual source files
+        const templateNameToFile = new Map<string, string>();
+        for (const tmpl of this.templates) {
+            if (tmpl.name && tmpl.filePath) {
+                templateNameToFile.set(tmpl.name, tmpl.filePath);
+            }
+        }
+        // Also map filenames (like "base.html") to their full paths
+        for (const filePath of this.includedFiles) {
+            templateNameToFile.set(path.basename(filePath), filePath);
+        }
+
         // Try to parse error message for file and line information
         // Common Go template error formats:
         // template: filename.html:23:15: undefined variable ".Missing"
         // template: filename.html:5: function "unknown" not defined
+        // template: content:1:1: error (where "content" is a defined template name)
         const errorRegex = /template:\s+(.+?):(\d+)(?::(\d+))?\s*:\s*(.+)/gi;
         const diagnosticsMap = new Map<string, vscode.Diagnostic[]>();
         
         let match;
         while ((match = errorRegex.exec(errorMessage)) !== null) {
-            const [, fileName, lineStr, columnStr, message] = match;
+            const [, templateName, lineStr, columnStr, message] = match;
             const line = parseInt(lineStr) - 1; // VS Code uses 0-based line numbers
             const column = columnStr ? parseInt(columnStr) - 1 : 0;
             
             // Try to find the actual file path
             let fileUri: vscode.Uri | undefined;
+            let resolvedFileName = templateName;
             
+            // First try to resolve template name to file path (handles "content" -> actual file)
+            if (templateNameToFile.has(templateName)) {
+                const resolvedPath = templateNameToFile.get(templateName)!;
+                fileUri = vscode.Uri.file(resolvedPath);
+                resolvedFileName = path.basename(resolvedPath);
+            }
             // Check if it matches current file
-            if (path.basename(this.currentFile.fsPath) === fileName) {
+            else if (path.basename(this.currentFile.fsPath) === templateName) {
                 fileUri = this.currentFile;
             } else {
-                // Check included files
+                // Check included files by basename
                 for (const includedPath of this.includedFiles) {
-                    if (path.basename(includedPath) === fileName) {
+                    if (path.basename(includedPath) === templateName) {
                         fileUri = vscode.Uri.file(includedPath);
                         break;
                     }
@@ -438,9 +470,14 @@ export class GoTemplatePreviewProvider {
                     new vscode.Position(Math.max(0, line), column + 50) // Highlight a reasonable length
                 );
                 
+                // Include resolved file name in the message if it was a template name
+                const displayMessage = templateName !== resolvedFileName 
+                    ? `[${templateName}] ${message.trim()}`
+                    : message.trim();
+                
                 const diagnostic = new vscode.Diagnostic(
                     range,
-                    message.trim(),
+                    displayMessage,
                     vscode.DiagnosticSeverity.Error
                 );
                 diagnostic.source = 'go-template';
@@ -675,18 +712,79 @@ export class GoTemplatePreviewProvider {
     }
 
     private getErrorHtml(error: string): string {
+        // Parse multiple errors from validation output
+        const errorLines = error.split('\n').filter(line => line.includes('template:'));
+        const hasMultipleErrors = errorLines.length > 1;
+        
+        // Format errors as clickable items
+        let errorListHtml = '';
+        if (hasMultipleErrors || error.includes('validation errors:')) {
+            const errors = this.parseErrorLines(error);
+            if (errors.length > 0) {
+                errorListHtml = `
+                    <div class="error-list">
+                        <h3>${errors.length} Error${errors.length > 1 ? 's' : ''} Found:</h3>
+                        <ul>
+                            ${errors.map(e => `
+                                <li class="error-item">
+                                    <span class="error-location">${this.escapeHtml(e.file)}:${e.line}:${e.column}</span>
+                                    <span class="error-message">${this.escapeHtml(e.message)}</span>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+        }
+        
         return `<!DOCTYPE html>
         <html lang="en">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Error</title>
+            <title>Template Errors</title>
             <style>
                 body {
                     font-family: var(--vscode-font-family);
-                    color: var(--vscode-errorForeground);
+                    color: var(--vscode-foreground);
                     background-color: var(--vscode-editor-background);
                     padding: 20px;
+                    line-height: 1.5;
+                }
+                h1 {
+                    color: var(--vscode-errorForeground);
+                    border-bottom: 1px solid var(--vscode-panel-border);
+                    padding-bottom: 10px;
+                }
+                h3 {
+                    color: var(--vscode-errorForeground);
+                    margin-bottom: 10px;
+                }
+                .error-list {
+                    margin: 20px 0;
+                }
+                .error-list ul {
+                    list-style: none;
+                    padding: 0;
+                    margin: 0;
+                }
+                .error-item {
+                    background-color: var(--vscode-inputValidation-errorBackground);
+                    border: 1px solid var(--vscode-inputValidation-errorBorder);
+                    border-radius: 4px;
+                    padding: 12px;
+                    margin-bottom: 8px;
+                }
+                .error-location {
+                    font-family: var(--vscode-editor-font-family);
+                    font-size: 12px;
+                    color: var(--vscode-textLink-foreground);
+                    display: block;
+                    margin-bottom: 4px;
+                }
+                .error-message {
+                    color: var(--vscode-errorForeground);
+                    display: block;
                 }
                 pre {
                     background-color: var(--vscode-textCodeBlock-background);
@@ -694,14 +792,75 @@ export class GoTemplatePreviewProvider {
                     border-radius: 4px;
                     white-space: pre-wrap;
                     word-wrap: break-word;
+                    font-size: 12px;
+                    margin-top: 20px;
+                }
+                .hint {
+                    background-color: var(--vscode-inputValidation-infoBackground);
+                    border: 1px solid var(--vscode-inputValidation-infoBorder);
+                    border-radius: 4px;
+                    padding: 12px;
+                    margin-top: 20px;
+                }
+                .hint h4 {
+                    margin: 0 0 8px 0;
+                    color: var(--vscode-inputValidation-infoForeground);
                 }
             </style>
         </head>
         <body>
-            <h1>Template Error or Missing Dependencies</h1>
-            <pre>${this.escapeHtml(error)}</pre>
+            <h1>Template Errors</h1>
+            ${errorListHtml}
+            ${error.includes('type mismatch') ? `
+                <div class="hint">
+                    <h4>💡 How to fix type mismatches:</h4>
+                    <p>Edit the value in the <strong>Variables</strong> panel to match the expected type:</p>
+                    <ul>
+                        <li>For number comparisons: use a number (e.g., <code>30</code>) not a string</li>
+                        <li>For boolean comparisons: use <code>true</code> or <code>false</code></li>
+                        <li>Or delete the data file to regenerate with correct types</li>
+                    </ul>
+                </div>
+            ` : ''}
+            <details>
+                <summary>Raw Error Output</summary>
+                <pre>${this.escapeHtml(error)}</pre>
+            </details>
         </body>
         </html>`;
+    }
+    
+    private parseErrorLines(error: string): Array<{file: string, line: number, column: number, message: string}> {
+        const errors: Array<{file: string, line: number, column: number, message: string}> = [];
+        const regex = /template:\s*([^:]+):(\d+):(\d+):\s*(.+)/g;
+        let match;
+        
+        // Build template name to file path mapping
+        const templateNameToFile = new Map<string, string>();
+        for (const tmpl of this.templates) {
+            if (tmpl.name && tmpl.filePath) {
+                templateNameToFile.set(tmpl.name, path.basename(tmpl.filePath));
+            }
+        }
+        
+        while ((match = regex.exec(error)) !== null) {
+            let fileName = match[1];
+            
+            // Resolve template names like "content" to actual file names
+            if (templateNameToFile.has(fileName)) {
+                const resolvedFile = templateNameToFile.get(fileName)!;
+                fileName = `${resolvedFile} [${fileName}]`;
+            }
+            
+            errors.push({
+                file: fileName,
+                line: parseInt(match[2]),
+                column: parseInt(match[3]),
+                message: match[4].trim()
+            });
+        }
+        
+        return errors;
     }
 
     private escapeHtml(text: string): string {
