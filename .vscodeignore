@@ -13,8 +13,7 @@ out/test/**
 *.vsix
 
 # Keep the binaries for all platforms
-!bin/template-helper
-!bin/template-helper.exe
+!bin/template-helper-*
 
 # Keep Go helper source
 !go-helper/**

@@ -1,22 +1,11 @@
 // The module 'vscode' contains the VS Code extensibility API
-// Import the module and reference it with the alias vscode in your code below
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { GoTemplatePreviewProvider } from './previewProvider';
-import { RenderContextProvider, TemplateVariablesProvider, TemplateDependenciesProvider, VariableItem } from './templateViewProviders';
-
-// Auto-dismissing notification helper (5 second timeout)
-function showTimedNotification(message: string, _type: 'info' | 'warning' | 'error' = 'info'): void {
-    const timeout = 5000;
-    vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, cancellable: false },
-        async (progress) => {
-            progress.report({ message });
-            await new Promise(resolve => setTimeout(resolve, timeout));
-        }
-    );
-}
+import { RenderContextProvider, TemplateVariablesProvider, TemplateDependenciesProvider, VariableItem, ServerInfoProvider, ServerInfoData } from './templateViewProviders';
+import { DevServerProvider, ServerConfig, ServerLogData } from './serverProvider';
+import { showTimedNotification, getHelperBinaryName } from './utils';
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -28,7 +17,7 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log(`VS Code version: ${vscode.version}`);
 	
 	// Check if Go helper binary exists
-	const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+	const helperBinaryName = getHelperBinaryName();
 	const helperPath = path.join(context.extensionPath, 'bin', helperBinaryName);
 	const helperExists = fs.existsSync(helperPath);
 	
@@ -76,6 +65,41 @@ ${buildCmdFromRoot}
 	const renderContextProvider = new RenderContextProvider();
 	const variablesProvider = new TemplateVariablesProvider();
 	const dependenciesProvider = new TemplateDependenciesProvider();
+	const serverInfoProvider = new ServerInfoProvider();
+	const serverProvider = new DevServerProvider(context);
+	serverProvider.setPreviewProvider(previewProvider);
+
+	// Connect server info updates to the server info view
+	serverProvider.onServerInfo((config: ServerConfig | undefined, logData: ServerLogData) => {
+		if (!config) {
+			serverInfoProvider.clear();
+			return;
+		}
+
+		const isContextMode = !!(config.contextFiles && config.contextFiles.length > 0);
+		const info: ServerInfoData = {
+			mode: isContextMode ? 'context' : 'convention',
+			port: serverProvider.getPort(),
+			// Context mode fields
+			entryFile: config.entryFile,
+			contextFiles: config.contextFiles,
+			dataFile: config.dataFile || undefined,
+			dataDir: config.dataDir || undefined,
+			contentRoot: config.contentRoot || undefined,
+			// Convention mode fields
+			pagesDir: isContextMode ? undefined : config.pagesDir,
+			layoutsDir: isContextMode ? undefined : config.layoutsDir,
+			partialsDir: isContextMode ? undefined : config.partialsDir,
+			staticDir: isContextMode ? undefined : config.staticDir,
+			layoutFile: isContextMode ? undefined : config.layoutFile,
+			// Log-parsed data
+			sharedFiles: logData.sharedFiles,
+			discoveredPages: logData.discoveredPages,
+			watchedDirs: logData.watchedDirs,
+		};
+
+		serverInfoProvider.refresh(info);
+	});
 
 	// Register tree views in the activity bar
 	const renderContextView = vscode.window.createTreeView('goTemplateRenderContext', {
@@ -93,6 +117,11 @@ ${buildCmdFromRoot}
 		showCollapseAll: false
 	});
 
+	const serverInfoView = vscode.window.createTreeView('goTemplateServerInfo', {
+		treeDataProvider: serverInfoProvider,
+		showCollapseAll: true
+	});
+
 	// Auto-open preview when template variables view becomes visible
 	variablesView.onDidChangeVisibility(async (e) => {
 		if (e.visible) {
@@ -105,7 +134,7 @@ ${buildCmdFromRoot}
 					// Check if preview is already open by checking context
 					const isPreviewActive = vscode.workspace.getConfiguration().get('goTemplatePreviewActive');
 					if (!isPreviewActive) {
-						await vscode.commands.executeCommand('go-template-viewer.openPreview', activeEditor.document.uri);
+						await vscode.commands.executeCommand('goTemplateViewer.openPreview', activeEditor.document.uri);
 					}
 				}
 			}
@@ -161,7 +190,7 @@ ${buildCmdFromRoot}
 	});
 
 	// Register commands
-	const openPreviewCommand = vscode.commands.registerCommand('go-template-viewer.openPreview', async (uri?: vscode.Uri) => {
+	const openPreviewCommand = vscode.commands.registerCommand('goTemplateViewer.openPreview', async (uri?: vscode.Uri) => {
 		let fileUri = uri;
 		
 		if (!fileUri) {
@@ -191,7 +220,7 @@ ${buildCmdFromRoot}
 		}
 	});
 
-	const refreshPreviewCommand = vscode.commands.registerCommand('go-template-viewer.refreshPreview', () => {
+	const refreshPreviewCommand = vscode.commands.registerCommand('goTemplateViewer.refreshPreview', () => {
 		previewProvider.refresh();
 	});
 
@@ -277,7 +306,7 @@ ${buildCmdFromRoot}
 		}
 		
 		if (selected.action === 'select' || selected.action === 'link') {
-			await vscode.commands.executeCommand('go-template-viewer.linkDataFile');
+			await vscode.commands.executeCommand('goTemplateViewer.linkDataFile');
 		} else if (selected.action === 'save') {
 			// Save current data to a new file
 			const currentData = previewProvider.getTemplateData();
@@ -337,12 +366,12 @@ ${buildCmdFromRoot}
 		const filePath = files[0].fsPath;
 		await previewProvider.addTemplateFile(filePath);
 		
-		showTimedNotification(`Added ${require('path').basename(filePath)} to render context`);
+		showTimedNotification(`Added ${path.basename(filePath)} to render context`);
 	});
 	
 	const removeTemplateFileCommand = vscode.commands.registerCommand('goTemplateViewer.removeTemplateFile', async (filePath: string) => {
 		await previewProvider.removeTemplateFile(filePath);
-		showTimedNotification(`Removed ${require('path').basename(filePath)} from render context`);
+		showTimedNotification(`Removed ${path.basename(filePath)} from render context`);
 	});
 
 	// Set as Base Template - right-click menu command
@@ -399,7 +428,7 @@ ${buildCmdFromRoot}
 		}
 	});
 
-	const linkDataFileCommand = vscode.commands.registerCommand('go-template-viewer.linkDataFile', async (uri?: vscode.Uri) => {
+	const linkDataFileCommand = vscode.commands.registerCommand('goTemplateViewer.linkDataFile', async (uri?: vscode.Uri) => {
 		let fileUri = uri;
 		
 		if (!fileUri) {
@@ -546,6 +575,27 @@ ${buildCmdFromRoot}
 		}
 	});
 
+	// Server commands
+	const toggleServerCommand = vscode.commands.registerCommand('goTemplateViewer.toggleServer', async () => {
+		await serverProvider.toggleServer();
+	});
+
+	const startServerCommand = vscode.commands.registerCommand('goTemplateViewer.startServer', async () => {
+		await serverProvider.startServer();
+	});
+
+	const stopServerCommand = vscode.commands.registerCommand('goTemplateViewer.stopServer', async () => {
+		await serverProvider.stopServer();
+	});
+
+	const openInBrowserCommand = vscode.commands.registerCommand('goTemplateViewer.openInBrowser', async () => {
+		await serverProvider.openInBrowser();
+	});
+
+	const showServerOutputCommand = vscode.commands.registerCommand('goTemplateViewer.showServerOutput', async () => {
+		serverProvider.showOutput();
+	});
+
 	// Register disposables
 	context.subscriptions.push(
 		openPreviewCommand,
@@ -565,19 +615,26 @@ ${buildCmdFromRoot}
 		addToContextCommand,
 		linkDataFileCommand,
 		removeDataFileCommand,
+		toggleServerCommand,
+		startServerCommand,
+		stopServerCommand,
+		openInBrowserCommand,
+		showServerOutputCommand,
 		documentSaveWatcher,
 		renderContextView,
 		variablesView,
 		dependenciesView,
-		previewProvider
+		serverInfoView,
+		previewProvider,
+		serverProvider
 	);
 
 	const activationDuration = Date.now() - activationTime;
 	console.log(`Extension activation completed in ${activationDuration}ms`);
 	console.log(`Registered ${context.subscriptions.length} disposables`);
 	console.log('Commands registered:');
-	console.log('  - go-template-viewer.openPreview');
-	console.log('  - go-template-viewer.refreshPreview');
+	console.log('  - goTemplateViewer.openPreview');
+	console.log('  - goTemplateViewer.refreshPreview');
 	console.log('  - goTemplateViewer.editVariable');
 	console.log('  - goTemplateViewer.changeEntryFile');
 	console.log('  - goTemplateViewer.manageDataFile');
@@ -585,7 +642,12 @@ ${buildCmdFromRoot}
 	console.log('  - goTemplateViewer.removeTemplateFile');
 	console.log('  - goTemplateViewer.setBaseTemplate');
 	console.log('  - goTemplateViewer.addToContext');
-	console.log('  - go-template-viewer.linkDataFile');
+	console.log('  - goTemplateViewer.linkDataFile');
+	console.log('  - goTemplateViewer.toggleServer');
+	console.log('  - goTemplateViewer.startServer');
+	console.log('  - goTemplateViewer.stopServer');
+	console.log('  - goTemplateViewer.openInBrowser');
+	console.log('  - goTemplateViewer.showServerOutput');
 	console.log('Views registered:');
 	console.log('  - goTemplateRenderContext');
 	console.log('  - goTemplateVariables');

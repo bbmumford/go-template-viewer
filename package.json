@@ -2,7 +2,7 @@
   "name": "go-template-viewer",
   "displayName": "Go Template Viewer",
   "description": "Live preview and development tool for Go templates with multi-file support, variable tracking, and dependency management",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "publisher": "bbmumford",
   "author": {
     "name": "Brandon Miller-Mumford"
@@ -40,17 +40,17 @@
   "contributes": {
     "commands": [
       {
-        "command": "go-template-viewer.openPreview",
+        "command": "goTemplateViewer.openPreview",
         "title": "Open Go Template Preview",
         "icon": "$(preview)"
       },
       {
-        "command": "go-template-viewer.refreshPreview",
+        "command": "goTemplateViewer.refreshPreview",
         "title": "Refresh Preview",
         "icon": "$(refresh)"
       },
       {
-        "command": "go-template-viewer.linkDataFile",
+        "command": "goTemplateViewer.linkDataFile",
         "title": "Link Data File to Template"
       },
       {
@@ -89,33 +89,86 @@
       },
       {
         "command": "goTemplateViewer.setBaseTemplate",
-        "title": "Go Template: Set as Base Template",
-        "icon": "$(home)"
+        "title": "Go Template: Set As Base Template",
+        "icon": "$(file-symlink-file)"
       },
       {
         "command": "goTemplateViewer.addToContext",
-        "title": "Go Template: Add to Context",
+        "title": "Go Template: Add To Template Context",
         "icon": "$(add)"
       },
       {
         "command": "goTemplateViewer.exportHtml",
-        "title": "Export Preview as HTML",
-        "icon": "$(save)"
+        "title": "Go Template: Export to HTML",
+        "icon": "$(export)"
+      },
+      {
+        "command": "goTemplateViewer.changeEntryFile",
+        "title": "Change Entry File"
+      },
+      {
+        "command": "goTemplateViewer.manageDataFile",
+        "title": "Manage Data File"
+      },
+      {
+        "command": "goTemplateViewer.removeTemplateFile",
+        "title": "Remove Template File",
+        "icon": "$(close)"
+      },
+      {
+        "command": "goTemplateViewer.editVariable",
+        "title": "Edit Variable"
+      },
+      {
+        "command": "goTemplateViewer.toggleServer",
+        "title": "Go Template: Toggle Dev Server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "goTemplateViewer.startServer",
+        "title": "Go Template: Start Dev Server",
+        "icon": "$(play)"
+      },
+      {
+        "command": "goTemplateViewer.stopServer",
+        "title": "Go Template: Stop Dev Server",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "goTemplateViewer.openInBrowser",
+        "title": "Go Template: Open in Browser",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "goTemplateViewer.showServerOutput",
+        "title": "Go Template: Show Server Output"
       }
     ],
     "menus": {
-      "commandPalette": [
-        {
-          "command": "goTemplateViewer.exportHtml",
-          "when": "goTemplatePreviewActive"
-        }
-      ],
       "view/title": [
         {
           "command": "goTemplateViewer.openDataFile",
           "when": "view == goTemplateVariables",
           "group": "navigation",
           "icon": "$(json)"
+        },
+        {
+          "command": "goTemplateViewer.startServer",
+          "when": "view == goTemplateRenderContext && !goTemplateServerRunning",
+          "group": "navigation@10",
+          "icon": "$(play)"
+        },
+        {
+          "command": "goTemplateViewer.stopServer",
+          "when": "view == goTemplateRenderContext && goTemplateServerRunning",
+          "group": "navigation@10",
+          "icon": "$(debug-stop)"
+        },
+        {
+          "command": "goTemplateViewer.openInBrowser",
+          "when": "view == goTemplateRenderContext && goTemplateServerRunning",
+          "group": "navigation@11",
+          "icon": "$(globe)"
         }
       ],
       "view/item/context": [
@@ -139,13 +192,13 @@
         },
         {
           "command": "goTemplateViewer.addTemplateFile",
-          "when": "view == goTemplateDependencies && viewItem == htmxHtmlRequest",
+          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
           "group": "inline",
           "icon": "$(add)"
         },
         {
           "command": "goTemplateViewer.addTemplateFile",
-          "when": "view == goTemplateDependencies && viewItem == htmxHtmlRequest",
+          "when": "view == goTemplateDependencies && viewItem =~ /htmxRequest|htmxHtmlRequest/",
           "group": "htmx@1"
         },
         {
@@ -157,7 +210,7 @@
       ],
       "explorer/context": [
         {
-          "command": "go-template-viewer.openPreview",
+          "command": "goTemplateViewer.openPreview",
           "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
           "group": "navigation",
           "icon": "$(open-preview)"
@@ -175,23 +228,27 @@
       ],
       "editor/title": [
         {
-          "command": "go-template-viewer.openPreview",
+          "command": "goTemplateViewer.openPreview",
           "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
           "group": "navigation",
           "icon": "$(open-preview)"
-        },
-        {
-          "command": "goTemplateViewer.exportHtml",
-          "when": "activeWebviewPanelId == 'goTemplatePreview' && goTemplatePreviewActive",
-          "group": "navigation",
-          "icon": "$(save)"
         }
       ],
       "editor/context": [
         {
-          "command": "go-template-viewer.linkDataFile",
+          "command": "goTemplateViewer.linkDataFile",
           "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
-          "group": "goTemplate"
+          "group": "goTemplate@3"
+        },
+        {
+          "command": "goTemplateViewer.setBaseTemplate",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/",
+          "group": "goTemplate@1"
+        },
+        {
+          "command": "goTemplateViewer.addToContext",
+          "when": "resourceExtname =~ /\\.(html|tmpl|tpl|gohtml)$/ && goTemplatePreviewActive",
+          "group": "goTemplate@2"
         }
       ]
     },
@@ -208,6 +265,11 @@
         {
           "id": "goTemplateDependencies",
           "name": "Template Dependencies"
+        },
+        {
+          "id": "goTemplateServerInfo",
+          "name": "Template Server",
+          "when": "goTemplateServerRunning"
         }
       ]
     },
@@ -227,6 +289,46 @@
           "type": "string",
           "default": "",
           "description": "Root directory for serving static assets (CSS, JS, images) relative to workspace. Leave empty to use template file directory."
+        },
+        "goTemplateViewer.serverPagesDir": {
+          "type": "string",
+          "default": "pages",
+          "description": "Pages directory for the dev server. URLs map directly to files in this directory."
+        },
+        "goTemplateViewer.serverLayoutsDir": {
+          "type": "string",
+          "default": "layouts",
+          "description": "Layouts directory containing base templates (e.g., base.html) that wrap page content."
+        },
+        "goTemplateViewer.serverPartialsDir": {
+          "type": "string",
+          "default": "partials",
+          "description": "Partials directory containing reusable template fragments (e.g., header.html, footer.html)."
+        },
+        "goTemplateViewer.serverStaticDir": {
+          "type": "string",
+          "default": "static",
+          "description": "Static assets directory served at /static/ (CSS, JavaScript, images)."
+        },
+        "goTemplateViewer.serverLayoutFile": {
+          "type": "string",
+          "default": "base.html",
+          "description": "Layout filename to use for wrapping page content (e.g., base.html, main.html)."
+        },
+        "goTemplateViewer.serverIndexFile": {
+          "type": "string",
+          "default": "",
+          "description": "Entry page filename for the / route (e.g., index.html). Auto-detected if empty."
+        },
+        "goTemplateViewer.serverPort": {
+          "type": "number",
+          "default": 3000,
+          "description": "Port for the development server."
+        },
+        "goTemplateViewer.disablePreviewCSP": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Disable the Content Security Policy in the preview panel. When enabled, inline scripts and external resources run without restrictions — useful for testing HTMX, Alpine.js, etc. **⚠️ Less secure.**"
         }
       }
     },

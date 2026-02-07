@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { TemplateDependency, HtmxDependency } from './types';
 
 // ============================================================================
@@ -87,7 +88,6 @@ class RenderingItem extends vscode.TreeItem {
         private filePath: string | undefined,
         private provider: RenderContextProvider
     ) {
-        const path = require('path');
         let label: string;
         let description: string;
         let tooltip: string;
@@ -122,7 +122,6 @@ class DataFileContextItem extends vscode.TreeItem {
         private dataFilePath: string | undefined,
         private provider: RenderContextProvider
     ) {
-        const path = require('path');
         const label = dataFilePath ? `Data: ${path.basename(dataFilePath)}` : 'Data: (none)';
         super(label, vscode.TreeItemCollapsibleState.None);
 
@@ -154,7 +153,6 @@ class IncludedTemplateItem extends vscode.TreeItem {
         private filePath: string,
         private provider: RenderContextProvider
     ) {
-        const path = require('path');
         const fileName = path.basename(filePath);
         super(` - ${fileName}`, vscode.TreeItemCollapsibleState.None);
 
@@ -629,7 +627,6 @@ export class TemplateDependenciesProvider implements vscode.TreeDataProvider<Dep
             
             if (provider) {
                 // Check if this provider is in the included files
-                const path = require('path');
                 dep.satisfied = this.includedFiles.some(file => 
                     provider.filePath.includes(path.basename(file))
                 );
@@ -655,7 +652,7 @@ export class TemplateDependenciesProvider implements vscode.TreeDataProvider<Dep
 
             // Template dependencies section
             if (this.dependencies.length > 0) {
-                items.push(new DependencySectionHeaderItem('Template Dependencies', this.dependencies.length));
+                items.push(new DependencySectionHeaderItem('Template Dependencies'));
                 items.push(...this.dependencies.map(dep => new DependencyItem(dep)));
             }
 
@@ -705,8 +702,8 @@ export class TemplateDependenciesProvider implements vscode.TreeDataProvider<Dep
 type DependencyTreeItem = DependencyItem | DependencySectionHeaderItem | HtmxSectionHeaderItem | HtmxStatusItem | HtmxTypeHeaderItem | HtmxRequestItem;
 
 class DependencySectionHeaderItem extends vscode.TreeItem {
-    constructor(label: string, count: number) {
-        super(`${label} (${count})`, vscode.TreeItemCollapsibleState.None);
+    constructor(label: string) {
+        super(label, vscode.TreeItemCollapsibleState.None);
         this.iconPath = new vscode.ThemeIcon('symbol-namespace');
         this.contextValue = 'dependencySectionHeader';
     }
@@ -724,8 +721,6 @@ class HtmxSectionHeaderItem extends vscode.TreeItem {
 export class DependencyItem extends vscode.TreeItem {
     constructor(public readonly dependency: TemplateDependency) {
         super(dependency.name, vscode.TreeItemCollapsibleState.None);
-        
-        const path = require('path');
         
         // Show satisfaction status
         const status = dependency.satisfied ? '✅' : '❌';
@@ -771,109 +766,8 @@ export class DependencyItem extends vscode.TreeItem {
 }
 
 // ============================================================================
-// HTMX DEPENDENCIES PROVIDER
+// HTMX TREE ITEM CLASSES
 // ============================================================================
-
-export class HtmxDependenciesProvider implements vscode.TreeDataProvider<HtmxDependencyItem> {
-    private _onDidChangeTreeData: vscode.EventEmitter<HtmxDependencyItem | undefined | null | void> = new vscode.EventEmitter<HtmxDependencyItem | undefined | null | void>();
-    readonly onDidChangeTreeData: vscode.Event<HtmxDependencyItem | undefined | null | void> = this._onDidChangeTreeData.event;
-
-    private dependencies: HtmxDependency[] = [];
-    private htmxDetected: boolean = false;
-    private htmxVersion?: string;
-    private includedFiles: string[] = [];
-
-    constructor() {}
-
-    refresh(dependencies: HtmxDependency[], htmxDetected: boolean, htmxVersion?: string, includedFiles?: string[]): void {
-        this.dependencies = dependencies;
-        this.htmxDetected = htmxDetected;
-        this.htmxVersion = htmxVersion;
-        this.includedFiles = includedFiles || [];
-        this._onDidChangeTreeData.fire();
-    }
-
-    getTreeItem(element: HtmxDependencyItem): vscode.TreeItem {
-        return element;
-    }
-
-    getChildren(element?: HtmxDependencyItem): Thenable<HtmxDependencyItem[]> {
-        if (!element) {
-            if (!this.htmxDetected) {
-                return Promise.resolve([new HtmxStatusItem('HTMX not detected', false)]);
-            }
-
-            const items: HtmxDependencyItem[] = [];
-            
-            // Status header
-            const statusMsg = this.htmxVersion 
-                ? `HTMX detected (v${this.htmxVersion})` 
-                : 'HTMX detected';
-            items.push(new HtmxStatusItem(statusMsg, true));
-
-            // Group by type
-            const byType = new Map<string, HtmxDependency[]>();
-            for (const dep of this.dependencies) {
-                if (!byType.has(dep.type)) {
-                    byType.set(dep.type, []);
-                }
-                byType.get(dep.type)!.push(dep);
-            }
-
-            // Add items grouped by type
-            for (const [type, deps] of byType) {
-                items.push(new HtmxTypeHeaderItem(type, deps.length));
-                for (const dep of deps) {
-                    items.push(new HtmxRequestItem(dep));
-                }
-            }
-
-            if (this.dependencies.length === 0) {
-                items.push(new HtmxStatusItem('No HTMX requests found', true));
-            }
-
-            return Promise.resolve(items);
-        }
-
-        // If element is an HtmxRequestItem, show its details and suggested fragments
-        if (element instanceof HtmxRequestItem) {
-            const items: HtmxDependencyItem[] = [];
-            const dep = element.dependency;
-            
-            // Show request details
-            items.push(new HtmxDetailItem('Method', dep.type));
-            if (dep.target) {
-                items.push(new HtmxDetailItem('Target', dep.target));
-            }
-            if (dep.swap) {
-                items.push(new HtmxDetailItem('Swap', dep.swap));
-            }
-            if (dep.trigger) {
-                items.push(new HtmxDetailItem('Trigger', dep.trigger));
-            }
-            
-            return Promise.resolve(items);
-        }
-
-        return Promise.resolve([]);
-    }
-}
-
-// Detail item to show HTMX request properties
-class HtmxDetailItem extends vscode.TreeItem {
-    constructor(
-        label: string,
-        value: string,
-        icon: string = 'info',
-        colorName: string = 'charts.gray'
-    ) {
-        super(`${label}: ${value}`, vscode.TreeItemCollapsibleState.None);
-        this.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor(colorName));
-        this.contextValue = 'htmxDetail';
-    }
-}
-
-type HtmxDependencyItem = HtmxStatusItem | HtmxTypeHeaderItem | HtmxRequestItem | HtmxDetailItem;
 
 class HtmxStatusItem extends vscode.TreeItem {
     constructor(
@@ -903,31 +797,10 @@ class HtmxTypeHeaderItem extends vscode.TreeItem {
     }
 }
 
-class SuggestedFragmentItem extends vscode.TreeItem {
-    constructor(
-        public readonly fragmentPath: string,
-        public readonly fullPath: string
-    ) {
-        super(fragmentPath, vscode.TreeItemCollapsibleState.None);
-        
-        this.tooltip = `Click to add ${fragmentPath} to render context`;
-        this.iconPath = new vscode.ThemeIcon('file-code', new vscode.ThemeColor('charts.purple'));
-        this.contextValue = 'suggestedFragment';
-        
-        // Command to add this template file
-        this.command = {
-            command: 'goTemplateViewer.addTemplateFile',
-            title: 'Add Template File',
-            arguments: [fullPath]
-        };
-    }
-}
-
 class HtmxRequestItem extends vscode.TreeItem {
     constructor(
         public readonly dependency: HtmxDependency
     ) {
-        const path = require('path');
         const fileName = path.basename(dependency.filePath);
         
         // All HTMX requests are non-collapsible now (no children to show)
@@ -977,3 +850,214 @@ class HtmxRequestItem extends vscode.TreeItem {
     }
 }
 
+// ============================================================================
+// SERVER INFO PROVIDER
+// ============================================================================
+
+export interface ServerInfoData {
+    mode: 'context' | 'convention' | 'unknown';
+    port: number;
+    // Context mode
+    entryFile?: string;
+    contextFiles?: string[];
+    dataFile?: string;
+    dataDir?: string;
+    contentRoot?: string;
+    // Convention mode
+    pagesDir?: string;
+    layoutsDir?: string;
+    partialsDir?: string;
+    staticDir?: string;
+    layoutFile?: string;
+    // Discovered from server logs
+    sharedFiles?: string[];
+    discoveredPages?: Array<{ url: string; file: string }>;
+    watchedDirs?: string[];
+}
+
+export class ServerInfoProvider implements vscode.TreeDataProvider<ServerInfoItem> {
+    private _onDidChangeTreeData: vscode.EventEmitter<ServerInfoItem | undefined | null | void> = new vscode.EventEmitter<ServerInfoItem | undefined | null | void>();
+    readonly onDidChangeTreeData: vscode.Event<ServerInfoItem | undefined | null | void> = this._onDidChangeTreeData.event;
+
+    private info: ServerInfoData | undefined;
+
+    constructor() {}
+
+    refresh(info?: ServerInfoData): void {
+        this.info = info;
+        this._onDidChangeTreeData.fire();
+    }
+
+    clear(): void {
+        this.info = undefined;
+        this._onDidChangeTreeData.fire();
+    }
+
+    getTreeItem(element: ServerInfoItem): vscode.TreeItem {
+        return element;
+    }
+
+    getChildren(element?: ServerInfoItem): Thenable<ServerInfoItem[]> {
+        if (!this.info) {
+            return Promise.resolve([]);
+        }
+
+        if (!element) {
+            // Root level
+            const items: ServerInfoItem[] = [];
+            const info = this.info;
+
+            // Server status
+            items.push(new ServerInfoValueItem(
+                `Server :${info.port}`,
+                `http://localhost:${info.port}`,
+                'radio-tower',
+                'charts.green'
+            ));
+
+            // Mode
+            const modeLabel = info.mode === 'context' ? 'Context Mode' : 'Convention Mode';
+            const modeIcon = info.mode === 'context' ? 'extensions' : 'folder-library';
+            items.push(new ServerInfoValueItem(modeLabel, '', modeIcon, 'charts.blue'));
+
+            if (info.mode === 'context') {
+                // Context mode sections
+                if (info.entryFile) {
+                    items.push(new ServerInfoValueItem(
+                        `Entry: ${path.basename(info.entryFile)}`,
+                        path.dirname(info.entryFile),
+                        'target',
+                        'charts.yellow'
+                    ));
+                }
+
+                // Shared files section
+                if (info.sharedFiles && info.sharedFiles.length > 0) {
+                    items.push(new ServerInfoSectionItem('Shared Templates', info.sharedFiles.length, 'files', info.sharedFiles.map(f => ({
+                        label: path.basename(f),
+                        description: vscode.workspace.asRelativePath(f, false),
+                        icon: 'file-code',
+                        color: 'charts.blue'
+                    }))));
+                }
+
+                // Discovered pages section
+                if (info.discoveredPages && info.discoveredPages.length > 0) {
+                    items.push(new ServerInfoSectionItem('Discovered Pages', info.discoveredPages.length, 'book', info.discoveredPages.map(p => ({
+                        label: p.url,
+                        description: path.basename(p.file),
+                        icon: 'globe',
+                        color: 'charts.purple'
+                    }))));
+                }
+
+                // Data
+                if (info.dataFile) {
+                    items.push(new ServerInfoValueItem(
+                        `Data: ${path.basename(info.dataFile)}`,
+                        vscode.workspace.asRelativePath(info.dataFile, false),
+                        'json',
+                        'charts.purple'
+                    ));
+                }
+
+            } else if (info.mode === 'convention') {
+                // Convention mode directories
+                if (info.pagesDir) {
+                    items.push(new ServerInfoDirItem('Pages', info.pagesDir));
+                }
+                if (info.layoutsDir) {
+                    items.push(new ServerInfoDirItem('Layouts', info.layoutsDir));
+                }
+                if (info.partialsDir) {
+                    items.push(new ServerInfoDirItem('Partials', info.partialsDir));
+                }
+                if (info.staticDir) {
+                    items.push(new ServerInfoDirItem('Static', info.staticDir));
+                }
+                if (info.layoutFile) {
+                    items.push(new ServerInfoValueItem(
+                        `Layout: ${info.layoutFile}`,
+                        '',
+                        'file-code',
+                        'charts.blue'
+                    ));
+                }
+            }
+
+            // Watched directories
+            if (info.watchedDirs && info.watchedDirs.length > 0) {
+                items.push(new ServerInfoSectionItem('Watched Directories', info.watchedDirs.length, 'eye', info.watchedDirs.map(d => ({
+                    label: path.basename(d),
+                    description: vscode.workspace.asRelativePath(d, false),
+                    icon: 'folder',
+                    color: 'charts.orange'
+                }))));
+            }
+
+            // Content root
+            if (info.contentRoot) {
+                items.push(new ServerInfoDirItem('Content Root', info.contentRoot));
+            }
+
+            return Promise.resolve(items);
+        }
+
+        // Section children
+        if (element instanceof ServerInfoSectionItem) {
+            return Promise.resolve(element.children.map(c =>
+                new ServerInfoValueItem(c.label, c.description, c.icon, c.color)
+            ));
+        }
+
+        return Promise.resolve([]);
+    }
+}
+
+type ServerInfoItem = ServerInfoValueItem | ServerInfoSectionItem | ServerInfoDirItem;
+
+class ServerInfoValueItem extends vscode.TreeItem {
+    constructor(
+        label: string,
+        description: string,
+        icon: string,
+        color: string
+    ) {
+        super(label, vscode.TreeItemCollapsibleState.None);
+        this.description = description;
+        this.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor(color));
+        this.contextValue = 'serverInfoValue';
+    }
+}
+
+class ServerInfoDirItem extends vscode.TreeItem {
+    constructor(
+        label: string,
+        dirPath: string
+    ) {
+        const relativePath = vscode.workspace.asRelativePath(dirPath, false);
+        super(`${label}: ${relativePath}`, vscode.TreeItemCollapsibleState.None);
+        this.description = '';
+        this.tooltip = dirPath;
+        this.iconPath = new vscode.ThemeIcon('folder-opened', new vscode.ThemeColor('charts.orange'));
+        this.contextValue = 'serverInfoDir';
+        this.command = {
+            command: 'revealInExplorer',
+            title: 'Reveal in Explorer',
+            arguments: [vscode.Uri.file(dirPath)]
+        };
+    }
+}
+
+class ServerInfoSectionItem extends vscode.TreeItem {
+    constructor(
+        label: string,
+        count: number,
+        icon: string,
+        public readonly children: Array<{ label: string; description: string; icon: string; color: string }>
+    ) {
+        super(`${label} (${count})`, vscode.TreeItemCollapsibleState.Collapsed);
+        this.iconPath = new vscode.ThemeIcon(icon, new vscode.ThemeColor('charts.blue'));
+        this.contextValue = 'serverInfoSection';
+    }
+}

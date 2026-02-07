@@ -22,11 +22,15 @@ func main() {
 	renderTemplate := renderCmd.String("template", "", "Specific template name to render (optional)")
 	renderFiles := renderCmd.String("files", "", "Comma-separated list of template files to include (if empty, auto-discover)")
 
+	serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
+	serveConfig := serveCmd.String("config", "", "JSON configuration for the dev server")
+
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <command> [options]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  inspect  - Analyze template and output dependency graph\n")
 		fmt.Fprintf(os.Stderr, "  render   - Render template with data\n")
+		fmt.Fprintf(os.Stderr, "  serve    - Start a filesystem-driven development server\n")
 		os.Exit(1)
 	}
 
@@ -49,6 +53,17 @@ func main() {
 			os.Exit(1)
 		}
 		if err := runRender(*renderEntry, *renderData, *renderWorkspace, *renderTemplate, *renderFiles); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "serve":
+		serveCmd.Parse(os.Args[2:])
+		if *serveConfig == "" {
+			fmt.Fprintf(os.Stderr, "Error: -config flag is required\n")
+			os.Exit(1)
+		}
+		if err := runServe(*serveConfig); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

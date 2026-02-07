@@ -2,6 +2,57 @@
 
 All notable changes to the Go Template Viewer extension.
 
+## [0.0.5] - 2026-02-08
+
+### Added
+- **Dev Server Mode**: Launch a full development server directly from the sidebar with play/stop buttons. Features include:
+  - **Dual Mode Operation**: Automatically selects between context mode (uses the active preview's render context) and convention mode (uses `pages/layouts/partials/` directories) — no configuration required
+  - **Context Mode**: When a preview is active, the server renders using the same entry file, shared templates, and linked data — then auto-discovers all navigable pages (files with `{{define "content"}}`) in the workspace so you can click links and navigate between pages. Each page loads its own data from `.vscode/template-data/` automatically
+  - **Convention Mode**: File-system routing with URL→file mapping, layout wrapping, partials, and sidecar JSON data
+  - **Unified Data System**: Server reads from the same `.vscode/template-data/` data files the extension manages — auto-discovers by matching `_templateContext.entryFile` metadata or filename convention
+  - **Port Fallback**: If the configured port is in use, automatically tries the next 10 ports, then falls back to an OS-assigned free port
+  - **SSE Live Reload**: File changes automatically refresh the browser via Server-Sent Events
+  - **Static File Serving**: Assets served from content root (context mode) or `/static/` directory (convention mode)
+  - **Status Bar Indicator**: Shows server state (▶ stopped, spinner starting, 🌐 running with port, ❌ error)
+  - **Open in Browser**: Globe button in sidebar title bar when server is running
+  - **Output Channel**: Dedicated "Go Template Server" output channel for server logs
+  - **Navigation Tree**: Auto-generated `{{.Site.Pages}}` with `isActive`/`isActivePrefix` helpers (convention mode)
+- **Template Server Sidebar View**: New "Template Server" tree view in the sidebar, visible only while the dev server is running. Shows:
+  - Server mode (context or convention)
+  - Entry file, shared templates, and discovered pages (context mode)
+  - Pages, layouts, partials, and static directories (convention mode)
+  - Data file path (if linked)
+- **CSP Toggle Setting**: New `goTemplateViewer.disablePreviewCSP` boolean setting to disable the Content Security Policy in the preview panel. When disabled, inline scripts and external resources (HTMX, Alpine.js, etc.) run without restrictions. A colour-coded banner at the top of the preview shows the current CSP state (🔒 green = enabled, ⚠️ amber = disabled).
+- **Server Configuration Settings**: 7 new settings — `serverPagesDir`, `serverLayoutsDir`, `serverPartialsDir`, `serverStaticDir`, `serverLayoutFile`, `serverIndexFile`, `serverPort`
+- **Template Helper Functions for Server**: `isActive`, `isActivePrefix`, `safeHTML`, `dict`, `json`, `toJSON`, `upper`, `lower`, `title`, `replace`, `contains`, `hasPrefix`, `hasSuffix`, `split`, `join`, `trim`, `default`, `seq`, `add`, `sub`, `mul`, `div`, `mod`, `len`, `slice`
+- **"Add To Template Context" Context Menu**: Right-click any template file in the Explorer or editor and select **"Go Template: Add To Template Context"** to add it to the current render context without changing the base template. Only visible when a preview is already active.
+- **"Set As Base Template" Context Menu (editor)**: The "Go Template: Set As Base Template" command now appears in the editor right-click menu in addition to the Explorer context menu.
+- **Missing Commands Registered**: `exportHtml`, `changeEntryFile`, `manageDataFile`, `removeTemplateFile`, `editVariable`, `setBaseTemplate`, and `addToContext` are now properly declared in `package.json` — ensuring they appear in menus and the command palette.
+- **Content Security Policy**: Webview preview now injects a CSP `<meta>` tag with nonce-based inline script protection for improved security.
+- **Shared Utility Module**: Extracted `showTimedNotification()`, `sanitizePathForFilename()`, and `getHelperBinaryName()` into a shared `utils.ts` module, eliminating duplicate code across `extension.ts`, `previewProvider.ts`, and `serverProvider.ts`.
+- **Cross-Platform Binaries**: Go helper is now cross-compiled for 6 targets — `windows/amd64`, `windows/arm64`, `darwin/amd64`, `darwin/arm64`, `linux/amd64`, `linux/arm64`. The extension auto-detects the platform via `getHelperBinaryName()` and loads the correct binary (e.g., `template-helper-darwin-arm64`). No Go toolchain required at install time.
+- **Interactive CSP Banner**: The preview CSP banner now includes a clickable **Settings** link (opens the `disablePreviewCSP` setting via `acquireVsCodeApi().postMessage()`) and a **✕ dismiss** button to hide the banner for the current session.
+- **Live Settings Re-Render**: Added `onDidChangeConfiguration` listener — toggling `disablePreviewCSP` or changing `contentRoot` now triggers an immediate preview re-render without needing to manually refresh.
+
+### Fixed
+- **Data File Re-Adding After Unlink**: Fixed bug where removing a linked data file would cause it to be automatically re-discovered on the next render cycle. A `dataFileUnlinked` flag now prevents auto-rediscovery after explicit unlink.
+- **Wrong Data File for Same-Named Templates**: Fixed bug where templates in different directories with the same base filename (e.g., `admin/base.html` and `public/base.html`) would retrieve each other's data files. Data files now use workspace-relative sanitized paths (e.g., `templates--admin--base.html.json`) instead of just the basename. Legacy basename-format files are still loaded with metadata validation.
+- **Synchronous File I/O**: Converted all `fs.existsSync`, `readFileSync`, `writeFileSync`, and `mkdirSync` calls in `previewProvider.ts` to async `fs.promises.*` equivalents to avoid blocking the extension host.
+- **Temp File Race Condition**: Temp files for Go helper rendering now use `crypto.randomUUID()` instead of `Date.now()` to prevent collisions under rapid successive renders.
+- **Go `strings.Title` Deprecation**: Replaced deprecated `strings.Title()` in `renderer.go` with a custom `titleCase()` function using `unicode.ToTitle`.
+- **Unified Command IDs**: All command IDs now consistently use `goTemplateViewer.*` prefix (previously some used `go-template-viewer.*`).
+- **Redundant Activation Event**: Removed duplicate `onLanguage:go-template` activation event from `package.json` (auto-generated by VS Code from language contributions).
+
+### Removed
+- **Dead Code Cleanup**: Removed unused `goTemplateParser.ts` (regex-based parser superseded by Go binary), `templateDataProvider.ts` (never imported), `HtmxDependenciesProvider` class, `HtmxDetailItem`, `HtmxDependencyItem`, and `SuggestedFragmentItem` classes.
+- **Inline `require('path')` Calls**: Replaced 6 inline `require('path')` calls in `templateViewProviders.ts` and 2 in `extension.ts` with top-level `import * as path from 'path'`.
+- **Duplicate Server Menu Buttons**: Removed duplicate stop/browser buttons that appeared on both the Render Context and Template Server sidebar views — they now appear only on the Render Context title bar.
+- **Template Dependencies Count Badge**: Removed the `(N)` count suffix from the "Template Dependencies" section header in the sidebar for a cleaner look.
+
+### Changed
+- **Timed Notifications**: `showTimedNotification()` now uses type-aware prefixes (❌ for errors, ⚠️ for warnings) instead of raw codicon text.
+- **Version**: Bumped to 0.0.5.
+
 ## [0.0.4] - 2026-01-03
 
 ### Added

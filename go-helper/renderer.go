@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"text/template/parse"
+	"unicode"
 )
 
 // ValidationError represents a single validation error with location info
@@ -449,7 +450,17 @@ func (r *TemplateRenderer) getTemplateFuncs() template.FuncMap {
 		},
 		"upper": strings.ToUpper,
 		"lower": strings.ToLower,
-		"title": strings.Title,
+		"title": func(s string) string {
+			prev := ' '
+			return strings.Map(func(r rune) rune {
+				if unicode.IsSpace(rune(prev)) || unicode.IsPunct(rune(prev)) {
+					prev = r
+					return unicode.ToTitle(r)
+				}
+				prev = r
+				return r
+			}, s)
+		},
 		"trim":  strings.TrimSpace,
 		// Array/slice helpers - accept (index, slice) to check position
 		"isLast": func(i int, slice interface{}) bool {

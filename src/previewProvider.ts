@@ -1,23 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { TemplateData, TemplateAnalysisResult, TemplateVariable, TemplateDependency, TemplateDefinition, HtmxDependency, HtmxInfo } from './types';
+import { showTimedNotification, sanitizePathForFilename, getHelperBinaryName } from './utils';
 
 const execFileAsync = promisify(execFile);
-
-// Auto-dismissing notification helper (5 second timeout)
-function showTimedNotification(message: string, _type: 'info' | 'warning' | 'error' = 'info'): void {
-    const timeout = 5000;
-    vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, cancellable: false },
-        async (progress) => {
-            progress.report({ message });
-            await new Promise(resolve => setTimeout(resolve, timeout));
-        }
-    );
-}
 
 export class GoTemplatePreviewProvider {
     private static readonly viewType = 'goTemplatePreview';
@@ -41,10 +31,25 @@ export class GoTemplatePreviewProvider {
     
     // Flag to track if initial context has been restored
     private contextRestored: boolean = false;
+    
+    // Flag to prevent auto-discovery of data files after explicit unlink
+    private dataFileUnlinked: boolean = false;
 
     constructor(private context: vscode.ExtensionContext) {
         this.diagnosticCollection = vscode.languages.createDiagnosticCollection('go-template');
         context.subscriptions.push(this.diagnosticCollection);
+
+        // Re-render when relevant settings change (e.g. CSP toggle)
+        context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration(e => {
+                if (e.affectsConfiguration('goTemplateViewer.disablePreviewCSP') ||
+                    e.affectsConfiguration('goTemplateViewer.contentRoot')) {
+                    if (this.panel && this.currentFile) {
+                        this.scheduleAnalyzeAndRender();
+                    }
+                }
+            })
+        );
     }
 
     onDataChange(callback: (variables: TemplateVariable[], dataFilePath?: string, dependencies?: TemplateDependency[], htmxInfo?: HtmxInfo) => void) {
@@ -65,6 +70,10 @@ export class GoTemplatePreviewProvider {
 
     public getCurrentFile(): string | undefined {
         return this.currentFile?.fsPath;
+    }
+
+    public getDataFilePath(): string | undefined {
+        return this.currentDataFilePath;
     }
 
     public setTemplateData(data: any) {
@@ -110,6 +119,9 @@ export class GoTemplatePreviewProvider {
             this.includedFiles.clear();
             this.includedFiles.add(fileUri.fsPath);
             this.contextRestored = false; // Allow context to be restored from data file
+            this.dataFileUnlinked = false; // Reset unlink flag for new context
+            this.currentDataFilePath = undefined; // Clear stale data file reference
+            this.templateData = {}; // Clear stale template data
             console.log('Reset context - includedFiles now:', Array.from(this.includedFiles));
         }
         
@@ -158,6 +170,12 @@ export class GoTemplatePreviewProvider {
                 this.panel = undefined;
                 this.disposeWatcher();
                 vscode.commands.executeCommand('setContext', 'goTemplatePreviewActive', false);
+            }, null, this.disposables);
+
+            this.panel.webview.onDidReceiveMessage((message) => {
+                if (message.command === 'openCSPSetting') {
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'goTemplateViewer.disablePreviewCSP');
+                }
             }, null, this.disposables);
         }
 
@@ -547,7 +565,7 @@ export class GoTemplatePreviewProvider {
     }
 
     private async analyzeTemplate(templatePath: string): Promise<TemplateAnalysisResult> {
-        const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+        const helperBinaryName = getHelperBinaryName();
         const helperPath = path.join(this.context.extensionPath, 'bin', helperBinaryName);
         
         // Check if helper exists
@@ -596,16 +614,16 @@ export class GoTemplatePreviewProvider {
     }
 
     private async renderTemplate(templatePath: string, data: TemplateData, templateName?: string): Promise<string> {
-        const helperBinaryName = process.platform === 'win32' ? 'template-helper.exe' : 'template-helper';
+        const helperBinaryName = getHelperBinaryName();
         const helperPath = path.join(this.context.extensionPath, 'bin', helperBinaryName);
         
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.currentFile!);
         const cwd = workspaceFolder?.uri.fsPath || path.dirname(templatePath);
 
-        // Create temp data file in OS temp directory
+        // Create temp data file in OS temp directory with unique name
         const dataJson = JSON.stringify(data);
-        const tempDataFile = path.join(require('os').tmpdir(), `template-data-${Date.now()}.json`);
-        fs.writeFileSync(tempDataFile, dataJson);
+        const tempDataFile = path.join(require('os').tmpdir(), `template-data-${crypto.randomUUID()}.json`);
+        await fs.promises.writeFile(tempDataFile, dataJson);
 
         try {
             // Build args array for execFile (safe from injection)
@@ -636,14 +654,12 @@ export class GoTemplatePreviewProvider {
             }
 
             // Clean up temp file
-            fs.unlinkSync(tempDataFile);
+            await fs.promises.unlink(tempDataFile);
 
             return stdout;
         } catch (error: any) {
             // Clean up temp file even on error
-            if (fs.existsSync(tempDataFile)) {
-                fs.unlinkSync(tempDataFile);
-            }
+            try { await fs.promises.unlink(tempDataFile); } catch { /* ignore */ }
             if (error.stderr) {
                 throw new Error(`Failed to render template: ${error.stderr}`);
             }
@@ -659,6 +675,10 @@ export class GoTemplatePreviewProvider {
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(this.currentFile);
         const contentRoot = this.getContentRoot(workspaceFolder);
         const baseDir = contentRoot || path.dirname(this.currentFile.fsPath);
+        const webview = this.panel.webview;
+
+        // Generate a nonce for the CSP
+        const nonce = crypto.randomUUID().replace(/-/g, '');
 
         // Replace relative paths with webview URIs
         let processedHtml = html;
@@ -670,7 +690,7 @@ export class GoTemplatePreviewProvider {
                 if (!href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('//')) {
                     const assetPath = path.join(baseDir, href);
                     if (fs.existsSync(assetPath)) {
-                        const assetUri = this.panel!.webview.asWebviewUri(vscode.Uri.file(assetPath));
+                        const assetUri = webview.asWebviewUri(vscode.Uri.file(assetPath));
                         return `<link ${before}${assetUri}${after}`;
                     }
                 }
@@ -685,7 +705,7 @@ export class GoTemplatePreviewProvider {
                 if (!src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('//')) {
                     const assetPath = path.join(baseDir, src);
                     if (fs.existsSync(assetPath)) {
-                        const assetUri = this.panel!.webview.asWebviewUri(vscode.Uri.file(assetPath));
+                        const assetUri = webview.asWebviewUri(vscode.Uri.file(assetPath));
                         return `<script ${before}${assetUri}${after}`;
                     }
                 }
@@ -700,13 +720,64 @@ export class GoTemplatePreviewProvider {
                 if (!src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('//') && !src.startsWith('data:')) {
                     const assetPath = path.join(baseDir, src);
                     if (fs.existsSync(assetPath)) {
-                        const assetUri = this.panel!.webview.asWebviewUri(vscode.Uri.file(assetPath));
+                        const assetUri = webview.asWebviewUri(vscode.Uri.file(assetPath));
                         return `<img ${before}${assetUri}${after}`;
                     }
                 }
                 return match;
             }
         );
+
+        // Check if CSP is disabled by user setting
+        const cspConfig = vscode.workspace.getConfiguration('goTemplateViewer');
+        const disableCSP = cspConfig.get<boolean>('disablePreviewCSP', false);
+
+        // Banner shown at the top of the preview
+        const bannerStyle = `position:fixed;top:0;left:0;right:0;z-index:99999;padding:4px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:11px;text-align:center;opacity:0.85;display:flex;align-items:center;justify-content:center;gap:8px;`;
+        const dismissBtn = `<button id="gtv-dismiss" style="background:none;border:none;color:inherit;cursor:pointer;font-size:14px;line-height:1;padding:0 2px;margin-left:4px;opacity:0.8;" title="Dismiss">&times;</button>`;
+        const bannerHtml = disableCSP
+            ? `<div id="gtv-csp-banner" style="${bannerStyle}background:#a84300;color:#fff;"><span>⚠️ Preview CSP disabled — scripts run without restrictions (<a href="#" id="gtv-settings" style="color:#ffd;text-decoration:underline;">Settings</a>)</span>${dismissBtn}</div>`
+            : `<div id="gtv-csp-banner" style="${bannerStyle}background:#1a6633;color:#fff;"><span>🔒 Preview CSP enabled — some scripts may be blocked (<a href="#" id="gtv-settings" style="color:#9df;text-decoration:underline;">Settings</a>)</span>${dismissBtn}</div>`;
+        const bannerScript = `<script nonce="${nonce}">(function(){var vscode;try{vscode=acquireVsCodeApi();}catch(e){}var s=document.getElementById('gtv-settings');var d=document.getElementById('gtv-dismiss');if(s){s.addEventListener('click',function(e){e.preventDefault();if(vscode)vscode.postMessage({command:'openCSPSetting'});});}if(d){d.addEventListener('click',function(){var b=document.getElementById('gtv-csp-banner');if(b)b.style.display='none';});}})();</script>`;
+
+        if (!disableCSP) {
+            // Inject Content Security Policy into <head>
+            const cspMeta = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline' https:; script-src 'nonce-${nonce}' ${webview.cspSource} https:; img-src ${webview.cspSource} data: https:; font-src ${webview.cspSource} https:;">`;
+
+            // Add nonce to inline <script> tags
+            processedHtml = processedHtml.replace(
+                /<script(?![^>]*\bsrc\b)([^>]*)>/gi,
+                (match, attrs) => {
+                    if (attrs.includes('nonce=')) {
+                        return match; // Already has nonce
+                    }
+                    return `<script nonce="${nonce}"${attrs}>`;
+                }
+            );
+
+            // Insert CSP + banner into <head>/<body>
+            if (processedHtml.includes('<head>')) {
+                processedHtml = processedHtml.replace('<head>', `<head>\n    ${cspMeta}`);
+            } else if (processedHtml.includes('<head ')) {
+                processedHtml = processedHtml.replace(/<head([^>]*)>/, `<head$1>\n    ${cspMeta}`);
+            } else {
+                // No <head> tag, wrap in minimal HTML structure
+                processedHtml = `<!DOCTYPE html><html><head>${cspMeta}</head><body>${processedHtml}</body></html>`;
+            }
+        } else {
+            // CSP disabled — ensure there's a basic HTML structure but no CSP meta
+            if (!processedHtml.includes('<head')) {
+                processedHtml = `<!DOCTYPE html><html><head></head><body>${processedHtml}</body></html>`;
+            }
+        }
+
+        // Inject the banner + script after <body>
+        const bannerBlock = `${bannerHtml}\n    ${bannerScript}`;
+        if (processedHtml.includes('<body>')) {
+            processedHtml = processedHtml.replace('<body>', `<body>\n    ${bannerBlock}`);
+        } else if (processedHtml.includes('<body ')) {
+            processedHtml = processedHtml.replace(/<body([^>]*)>/, `<body$1>\n    ${bannerBlock}`);
+        }
 
         return processedHtml;
     }
@@ -1084,20 +1155,25 @@ export class GoTemplatePreviewProvider {
             return;
         }
 
+        // Don't save if user explicitly unlinked and there's no linked file
+        if (this.dataFileUnlinked && !this.currentDataFilePath) {
+            return;
+        }
+
         // If we have a linked data file, save to that location
         let dataFile: string;
         
         if (this.currentDataFilePath) {
             dataFile = this.currentDataFilePath;
         } else {
-            // No linked file, save to auto-named file
+            // No linked file, save to auto-named file using workspace-relative path
+            // to avoid collisions between files with the same basename in different directories
             const dataDir = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data');
-            if (!fs.existsSync(dataDir)) {
-                fs.mkdirSync(dataDir, { recursive: true });
-            }
+            await fs.promises.mkdir(dataDir, { recursive: true });
 
-            const templateName = path.basename(this.currentFile.fsPath);
-            dataFile = path.join(dataDir, `${templateName}.json`);
+            const relativePath = path.relative(workspaceFolder.uri.fsPath, this.currentFile.fsPath);
+            const sanitizedName = sanitizePathForFilename(relativePath);
+            dataFile = path.join(dataDir, `${sanitizedName}.json`);
             
             // Update currentDataFilePath to track where we saved
             this.currentDataFilePath = dataFile;
@@ -1118,7 +1194,7 @@ export class GoTemplatePreviewProvider {
             };
             
             const content = JSON.stringify(dataWithContext, null, 2);
-            fs.writeFileSync(dataFile, content);
+            await fs.promises.writeFile(dataFile, content);
         } catch (error) {
             showTimedNotification(`Error saving template data: ${error}`, 'error');
         }
@@ -1138,12 +1214,23 @@ export class GoTemplatePreviewProvider {
             return;
         }
 
+        // If user explicitly unlinked and we have no current data file, skip auto-discovery
+        if (this.dataFileUnlinked && !this.currentDataFilePath) {
+            return;
+        }
+
+        // If we already have a data file path loaded, don't re-discover on subsequent renders
+        if (this.currentDataFilePath) {
+            return;
+        }
+
         // First, check workspace configuration for linked data file
         const configLinkedFile = await this.getConfigLinkedDataFile(this.currentFile.fsPath, workspaceFolder.uri.fsPath);
         
-        if (configLinkedFile && fs.existsSync(configLinkedFile)) {
+        if (configLinkedFile) {
             try {
-                const content = fs.readFileSync(configLinkedFile, 'utf8');
+                await fs.promises.access(configLinkedFile);
+                const content = await fs.promises.readFile(configLinkedFile, 'utf8');
                 const parsed = JSON.parse(content);
                 
                 // Extract template context if present and restore if requested
@@ -1164,9 +1251,10 @@ export class GoTemplatePreviewProvider {
         // Second, check if the template file has a data-file annotation (for backwards compatibility)
         const commentLinkedFile = await this.getCommentLinkedDataFile(this.currentFile.fsPath, workspaceFolder.uri.fsPath);
         
-        if (commentLinkedFile && fs.existsSync(commentLinkedFile)) {
+        if (commentLinkedFile) {
             try {
-                const content = fs.readFileSync(commentLinkedFile, 'utf8');
+                await fs.promises.access(commentLinkedFile);
+                const content = await fs.promises.readFile(commentLinkedFile, 'utf8');
                 const parsed = JSON.parse(content);
                 
                 // Extract template context if present and restore if requested
@@ -1184,14 +1272,31 @@ export class GoTemplatePreviewProvider {
             }
         }
 
-        // Fall back to auto-named data file
-        const templateName = path.basename(this.currentFile.fsPath);
-        const dataFile = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data', `${templateName}.json`);
+        // Fall back to auto-named data file using workspace-relative path
+        const relativePath = path.relative(workspaceFolder.uri.fsPath, this.currentFile.fsPath);
+        const sanitizedName = sanitizePathForFilename(relativePath);
+        const dataFile = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data', `${sanitizedName}.json`);
 
-        if (fs.existsSync(dataFile)) {
+        // Also check legacy basename-only format for backwards compatibility
+        const legacyDataFile = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data', `${path.basename(this.currentFile.fsPath)}.json`);
+
+        const fileToLoad = await this.findExistingFile(dataFile, legacyDataFile);
+        if (fileToLoad) {
             try {
-                const content = fs.readFileSync(dataFile, 'utf8');
+                const content = await fs.promises.readFile(fileToLoad, 'utf8');
                 const parsed = JSON.parse(content);
+                
+                // Verify this data file actually belongs to this template
+                // by checking the _templateContext.entryFile metadata
+                if (parsed._templateContext?.entryFile) {
+                    const savedEntryFile = parsed._templateContext.entryFile;
+                    if (savedEntryFile !== relativePath && fileToLoad === legacyDataFile) {
+                        // This legacy file belongs to a different template with the same basename
+                        console.log(`Skipping legacy data file - belongs to ${savedEntryFile}, not ${relativePath}`);
+                        this.currentDataFilePath = undefined;
+                        return;
+                    }
+                }
                 
                 // Extract template context if present and restore if requested
                 if (restoreContext && parsed._templateContext) {
@@ -1201,13 +1306,28 @@ export class GoTemplatePreviewProvider {
                 // Remove _templateContext from runtime data
                 const { _templateContext, ...dataOnly } = parsed;
                 this.templateData = dataOnly;
-                this.currentDataFilePath = dataFile;
+                this.currentDataFilePath = fileToLoad;
             } catch (error) {
                 console.error('Error loading template data:', error);
             }
         } else {
             this.currentDataFilePath = undefined;
         }
+    }
+
+    /**
+     * Find the first existing file from the candidates list.
+     */
+    private async findExistingFile(...candidates: string[]): Promise<string | undefined> {
+        for (const candidate of candidates) {
+            try {
+                await fs.promises.access(candidate);
+                return candidate;
+            } catch {
+                // File doesn't exist, try next
+            }
+        }
+        return undefined;
     }
 
     /**
@@ -1224,9 +1344,10 @@ export class GoTemplatePreviewProvider {
             
             for (const relativePath of context.includedFiles) {
                 const absolutePath = path.join(workspaceRoot, relativePath);
-                if (fs.existsSync(absolutePath)) {
+                try {
+                    await fs.promises.access(absolutePath);
                     this.includedFiles.add(absolutePath);
-                } else {
+                } catch {
                     console.warn(`Saved template file not found: ${relativePath}`);
                 }
             }
@@ -1254,21 +1375,28 @@ export class GoTemplatePreviewProvider {
         try {
             const configFile = path.join(workspaceFolder.uri.fsPath, '.vscode', 'template-data-links.json');
             
-            if (fs.existsSync(configFile)) {
-                const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+            try {
+                await fs.promises.access(configFile);
+                const raw = await fs.promises.readFile(configFile, 'utf8');
+                const config = JSON.parse(raw);
                 const relativeTemplatePath = path.relative(workspaceFolder.uri.fsPath, this.currentFile.fsPath);
                 
                 if (config[relativeTemplatePath]) {
                     delete config[relativeTemplatePath];
-                    fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+                    await fs.promises.writeFile(configFile, JSON.stringify(config, null, 2));
                     console.log('Removed data file link from config');
                 }
+            } catch {
+                // Config file doesn't exist, nothing to remove
             }
         } catch (error) {
             console.error('Error removing data file link:', error);
         }
 
-        // Clear current data file path
+        // Set flag to prevent loadTemplateData from re-discovering auto-named files
+        this.dataFileUnlinked = true;
+        
+        // Clear current data file path and reset template data
         this.currentDataFilePath = undefined;
         this.templateData = {};
     }
@@ -1277,11 +1405,14 @@ export class GoTemplatePreviewProvider {
         try {
             const configFile = path.join(workspaceRoot, '.vscode', 'template-data-links.json');
             
-            if (!fs.existsSync(configFile)) {
+            try {
+                await fs.promises.access(configFile);
+            } catch {
                 return undefined;
             }
 
-            const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+            const raw = await fs.promises.readFile(configFile, 'utf8');
+            const config = JSON.parse(raw);
             
             // Use workspace-relative path as key
             const relativeTemplatePath = path.relative(workspaceRoot, templatePath);
@@ -1303,7 +1434,7 @@ export class GoTemplatePreviewProvider {
 
     private async getCommentLinkedDataFile(templatePath: string, workspaceRoot: string): Promise<string | undefined> {
         try {
-            const content = fs.readFileSync(templatePath, 'utf8');
+            const content = await fs.promises.readFile(templatePath, 'utf8');
             
             // Look for <!-- template-data: path/to/file.json --> annotation
             const match = content.match(/<!--\s*template-data:\s*(.+?)\s*-->/);
@@ -1336,18 +1467,16 @@ export class GoTemplatePreviewProvider {
         const configFile = path.join(configDir, 'template-data-links.json');
 
         // Ensure .vscode directory exists
-        if (!fs.existsSync(configDir)) {
-            fs.mkdirSync(configDir, { recursive: true });
-        }
+        await fs.promises.mkdir(configDir, { recursive: true });
 
         // Load existing config or create new
         let config: Record<string, string> = {};
-        if (fs.existsSync(configFile)) {
-            try {
-                config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-            } catch (error) {
-                console.error('Error reading existing config:', error);
-            }
+        try {
+            await fs.promises.access(configFile);
+            const raw = await fs.promises.readFile(configFile, 'utf8');
+            config = JSON.parse(raw);
+        } catch {
+            // File doesn't exist yet, start with empty config
         }
 
         // Store as workspace-relative paths
@@ -1357,22 +1486,25 @@ export class GoTemplatePreviewProvider {
         config[relativeTemplatePath] = relativeDataPath;
 
         // Save config
-        fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+        await fs.promises.writeFile(configFile, JSON.stringify(config, null, 2));
         console.log('Saved data file link:', relativeTemplatePath, '->', relativeDataPath);
+        
+        // Clear unlink flag since user is now explicitly linking a file
+        this.dataFileUnlinked = false;
         
         // If this is the current file, update the data file path and reload
         if (this.currentFile && templatePath === this.currentFile.fsPath) {
             this.currentDataFilePath = dataFilePath;
             
-            // Load the linked data file
-            if (fs.existsSync(dataFilePath)) {
-                try {
-                    const content = fs.readFileSync(dataFilePath, 'utf8');
-                    this.templateData = JSON.parse(content);
-                    console.log('Loaded newly linked data file');
-                } catch (error) {
-                    console.error('Error loading linked data file:', error);
-                }
+            try {
+                const content = await fs.promises.readFile(dataFilePath, 'utf8');
+                const parsed = JSON.parse(content);
+                // Remove _templateContext from runtime data if present
+                const { _templateContext, ...dataOnly } = parsed;
+                this.templateData = dataOnly;
+                console.log('Loaded newly linked data file');
+            } catch (error) {
+                console.error('Error loading linked data file:', error);
             }
         }
     }
